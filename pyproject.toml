@@ -1,11 +1,12 @@
 [project]
 name = "markdown2docx"
 version = "0.1.0"
-description = "Convert Markdown files to DOCX format"
+description = "Convert Markdown files to DOCX format with modern standards support"
 requires-python = ">=3.13"
 dependencies = [
     "pypandoc>=1.13",
-    "python-docx>=1.1.0",
+    "python-docx>=1.1.2",
+    "lxml>=5.0.0",  # For better XML processing
 ]
 
 [dependency-groups]
