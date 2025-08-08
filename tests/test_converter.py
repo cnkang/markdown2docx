@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from src.markdown2docx.converter import MarkdownToDocxConverter
+from markdown2docx.converter import MarkdownToDocxConverter
 
 
 @pytest.fixture

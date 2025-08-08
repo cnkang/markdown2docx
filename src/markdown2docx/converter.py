@@ -30,8 +30,7 @@ class MarkdownToDocxConverter:
         pypandoc.convert_file(
             str(input_path),
             'docx',
-            outputfile=str(output_path),
-            extra_args=['--reference-doc=']
+            outputfile=str(output_path)
         )
         
         return output_path
