@@ -145,7 +145,7 @@ uv run pytest --cov=src
 测试示例转换：
 
 ```bash
-uv run python -m src.markdown2docx.cli example.md -o example_output.docx
+uv run python -m src.markdown2docx.cli examples/example.md -o example_output.docx
 ```
 
 ## 系统要求

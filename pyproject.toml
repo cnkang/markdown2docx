@@ -22,3 +22,9 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+markers = [
+    "integration: marks tests as integration tests",
+    "cli: marks tests as CLI tests",
+    "template: marks tests as template tests"
+]
