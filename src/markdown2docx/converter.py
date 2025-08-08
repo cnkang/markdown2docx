@@ -1,163 +1,152 @@
-"""Markdown to DOCX converter implementation."""
+"""Markdown → DOCX converter (Pandoc) with sane defaults & validation hook."""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional, Sequence
 
 import pypandoc
-from pathlib import Path
-from typing import Optional, Dict, Any
-import tempfile
-import os
+
+try:
+    # Used for robust version comparison (optional)
+    from packaging.version import Version
+except ImportError:
+    Version = None  # Converter still works without packaging; only strict compare is skipped
+
+log = logging.getLogger(__name__)
 
 
 class MarkdownToDocxConverter:
-    """Convert Markdown files to DOCX format using pypandoc with modern DOCX standards."""
-    
-    def __init__(self, reference_doc: Optional[str | Path] = None):
-        """Initialize converter with optional reference document.
-        
+    """
+    Convert Markdown to DOCX via Pandoc with an emphasis on:
+    - Using a reference DOCX to control styles (Headings, Code, Table, etc.)
+    - Predictable Markdown reader extensions (GFM-based)
+    - Optional post-conversion validation hook (OOXML/OPC)
+    """
+
+    # Recommended Markdown reader: GitHub Flavored Markdown + compatible extensions
+    _DEFAULT_MD_READER = (
+        "gfm"
+        "+footnotes"
+        "+tex_math_dollars"
+        "+fenced_divs"
+        "+bracketed_spans"
+    )
+
+    def __init__(self, reference_doc: Optional[str | Path] = None, min_pandoc: str = "2.19"):
+        """
         Args:
-            reference_doc: Path to reference DOCX file for styling
+            reference_doc: Optional path to a reference DOCX used to control styles.
+            min_pandoc: Minimum recommended Pandoc version string.
         """
         self.reference_doc = Path(reference_doc) if reference_doc else None
-        self._ensure_pandoc_version()
-    
-    def _ensure_pandoc_version(self) -> None:
-        """Ensure pandoc version supports modern DOCX features."""
+        self.min_pandoc = min_pandoc
+        self._ensure_pandoc(min_pandoc)
+
+    def _ensure_pandoc(self, min_version: str) -> None:
+        """Log a warning if local Pandoc is older than the recommended version."""
         try:
-            version = pypandoc.get_pandoc_version()
-            if version < (2, 19):  # Minimum version for modern DOCX support
-                print(f"Warning: Pandoc version {version} may not support all modern DOCX features. Consider upgrading to 2.19+")
-        except Exception:
-            print("Warning: Could not determine pandoc version")
-    
-    def convert(self, 
-                input_path: str | Path, 
-                output_path: Optional[str | Path] = None,
-                **options) -> Path:
-        """Convert markdown file to modern DOCX format.
-        
+            ver = str(pypandoc.get_pandoc_version())
+            if Version is None:
+                log.info("Pandoc %s detected (skip strict compare; install 'packaging' for version checks).", ver)
+            elif Version(ver) < Version(min_version):
+                log.warning("Pandoc %s detected; recommend >= %s for robust DOCX output.", ver, min_version)
+        except Exception as e:
+            log.warning("Unable to determine Pandoc version: %s", e)
+
+    def convert(
+        self,
+        input_path: str | Path,
+        output_path: Optional[str | Path] = None,
+        *,
+        toc: bool = False,
+        toc_depth: int = 3,
+        extra_args: Optional[Sequence[str]] = None,
+        run_validator: bool = False,
+    ) -> Path:
+        """
+        Convert a Markdown file to DOCX.
+
         Args:
-            input_path: Path to input markdown file
-            output_path: Path to output DOCX file (optional)
-            **options: Additional pandoc options
-            
+            input_path: Path to the Markdown file.
+            output_path: Optional path to the DOCX result; defaults to input basename with .docx.
+            toc: Whether to include a table of contents.
+            toc_depth: Depth of the table of contents (if toc=True).
+            extra_args: Additional Pandoc arguments to append.
+            run_validator: Run a post-conversion validation hook.
+
         Returns:
-            Path to the created DOCX file
+            Path to the generated DOCX file.
+
+        Raises:
+            FileNotFoundError: If the input file (or reference doc) does not exist.
+            RuntimeError: If Pandoc is missing or conversion/validation fails.
         """
         input_path = Path(input_path)
         if not input_path.exists():
-            raise FileNotFoundError(f"Input file not found: {input_path}")
-            
-        if output_path is None:
-            output_path = input_path.with_suffix('.docx')
-        else:
-            output_path = Path(output_path)
-        
-        # Configure pandoc options for modern DOCX output
-        pandoc_args = self._get_modern_docx_args(**options)
-        
+            raise FileNotFoundError(input_path)
+
+        output_path = Path(output_path) if output_path else input_path.with_suffix(".docx")
+
+        args = self._build_args(toc=toc, toc_depth=toc_depth, extra_args=extra_args)
+
         try:
             pypandoc.convert_file(
                 str(input_path),
-                'docx',
+                to="docx",
                 outputfile=str(output_path),
-                extra_args=pandoc_args
+                extra_args=args,
             )
+        except OSError as e:
+            # Common pypandoc case: Pandoc not installed on the system
+            raise RuntimeError(
+                "Pandoc not found. Install Pandoc or call pypandoc.download_pandoc() before converting."
+            ) from e
         except Exception as e:
-            raise RuntimeError(f"Conversion failed: {e}")
-        
+            raise RuntimeError(f"Conversion failed: {e}") from e
+
+        if run_validator:
+            self._validate_docx(output_path)
+
         return output_path
-    
-    def _get_modern_docx_args(self, **options) -> list[str]:
-        """Get pandoc arguments for modern DOCX output."""
-        args = []
-        
-        # Use reference document if provided
-        if self.reference_doc and self.reference_doc.exists():
-            args.extend(['--reference-doc', str(self.reference_doc)])
-        
-        # Modern DOCX features
-        args.extend([
-            '--wrap=preserve',  # Preserve line wrapping
-            '--columns=72',     # Standard column width
-            '--toc-depth=3',    # Table of contents depth
-        ])
-        
-        # Ensure headings are properly styled as Word headings
-        # This is crucial for proper heading recognition in Word
-        args.extend([
-            '--standalone',     # Generate standalone document with proper styles
-        ])
-        
-        # Enable modern markdown extensions (compatible with Pandoc 3.x)
-        markdown_extensions = [
-            'fenced_code_blocks', 
-            'footnotes',
-            'definition_lists',
-            'strikeout',
-            'superscript',
-            'subscript',
-            'task_lists',
-            'pipe_tables',
-            'grid_tables',
-            'multiline_tables',
-            'simple_tables',
-            'table_captions',
-            'header_attributes',
-            'fenced_code_attributes',
-            'bracketed_spans',
-            'fenced_divs'
-        ]
-        
-        # Add extensions to from format
-        from_format = f"markdown+{'+'.join(markdown_extensions)}"
-        args.extend(['-f', from_format])
-        
-        # Ensure proper DOCX output format with heading styles
-        # This is crucial for Word to recognize headings properly
-        args.extend(['-t', 'docx+styles'])
-        
-        # Add table of contents if requested
-        if options.get('--toc') or options.get('toc'):
-            args.append('--toc')
-            toc_depth = options.get('--toc-depth', options.get('toc_depth', 3))
-            args.extend(['--toc-depth', str(toc_depth)])
-        
-        # Custom options from user
-        for key, value in options.items():
-            if key.startswith('--') and key not in ['--toc', '--toc-depth']:
-                if value is True:
-                    args.append(key)
-                elif value is not False:
-                    args.extend([key, str(value)])
-            elif key in ['toc', 'toc_depth']:  # Skip these as they're handled above
-                continue
-        
+
+    def _build_args(
+        self, *, toc: bool, toc_depth: int, extra_args: Optional[Sequence[str]]
+    ) -> list[str]:
+        """Build a predictable set of Pandoc arguments for DOCX output."""
+        args: list[str] = ["-f", self._DEFAULT_MD_READER]
+
+        # Use a reference DOCX to control styles (headings, captions, code, etc.)
+        if self.reference_doc:
+            if not self.reference_doc.exists():
+                raise FileNotFoundError(f"Reference DOCX not found: {self.reference_doc}")
+            args.extend(["--reference-doc", str(self.reference_doc)])
+
+        # Optional ToC
+        if toc:
+            args.append("--toc")
+            args.extend(["--toc-depth", str(toc_depth)])
+
+        # Intentionally avoid flags that are irrelevant or noisy for DOCX:
+        # - wrap/columns/highlight/email-obfuscation/etc.
+        # If you need code highlighting, prefer styling it via the reference DOCX.
+
+        # Allow callers to extend behavior
+        if extra_args:
+            args.extend(extra_args)
+
         return args
-    
-    def convert_with_template(self, 
-                            input_path: str | Path,
-                            template_path: str | Path,
-                            output_path: Optional[str | Path] = None) -> Path:
-        """Convert markdown using a DOCX template for consistent styling.
-        
-        Args:
-            input_path: Path to input markdown file
-            template_path: Path to DOCX template file
-            output_path: Path to output DOCX file (optional)
-            
-        Returns:
-            Path to the created DOCX file
+
+    def _validate_docx(self, path: Path) -> None:
         """
-        template_path = Path(template_path)
-        if not template_path.exists():
-            raise FileNotFoundError(f"Template file not found: {template_path}")
-        
-        # Temporarily set reference document
-        original_ref = self.reference_doc
-        self.reference_doc = template_path
-        
+        Optional validation hook.
+        Integrate your validator here (e.g., Open XML SDK Validator via subprocess).
+        Keep it simple and fail-fast in CI if validation errors are found.
+        """
         try:
-            result = self.convert(input_path, output_path)
-        finally:
-            self.reference_doc = original_ref
-            
-        return result
+            # Example placeholder:
+            # subprocess.run(["ooxml-validator", str(path)], check=True)
+            pass
+        except Exception as e:
+            raise RuntimeError(f"Validation failed: {e}") from e
