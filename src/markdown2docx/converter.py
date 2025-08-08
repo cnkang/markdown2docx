@@ -81,6 +81,12 @@ class MarkdownToDocxConverter:
             '--toc-depth=3',    # Table of contents depth
         ])
         
+        # Ensure headings are properly styled as Word headings
+        # This is crucial for proper heading recognition in Word
+        args.extend([
+            '--standalone',     # Generate standalone document with proper styles
+        ])
+        
         # Enable modern markdown extensions (compatible with Pandoc 3.x)
         markdown_extensions = [
             'fenced_code_blocks', 
@@ -105,13 +111,25 @@ class MarkdownToDocxConverter:
         from_format = f"markdown+{'+'.join(markdown_extensions)}"
         args.extend(['-f', from_format])
         
+        # Ensure proper DOCX output format with heading styles
+        # This is crucial for Word to recognize headings properly
+        args.extend(['-t', 'docx+styles'])
+        
+        # Add table of contents if requested
+        if options.get('--toc') or options.get('toc'):
+            args.append('--toc')
+            toc_depth = options.get('--toc-depth', options.get('toc_depth', 3))
+            args.extend(['--toc-depth', str(toc_depth)])
+        
         # Custom options from user
         for key, value in options.items():
-            if key.startswith('--'):
+            if key.startswith('--') and key not in ['--toc', '--toc-depth']:
                 if value is True:
                     args.append(key)
                 elif value is not False:
                     args.extend([key, str(value)])
+            elif key in ['toc', 'toc_depth']:  # Skip these as they're handled above
+                continue
         
         return args
     

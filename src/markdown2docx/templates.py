@@ -44,47 +44,56 @@ class DocxTemplateManager:
         # Create table styles
         DocxTemplateManager._create_table_styles(doc)
         
-        # Add a sample paragraph to establish the template
-        doc.add_paragraph("This is a template document. Delete this content when using.")
+        # Add sample content to establish the template structure
+        doc.add_heading('标题1示例', level=1)
+        doc.add_paragraph('这是正文段落示例。')
+        doc.add_heading('标题2示例', level=2)
+        doc.add_paragraph('这是另一个正文段落示例。')
+        doc.add_heading('标题3示例', level=3)
+        doc.add_paragraph('删除此模板内容后即可使用。')
         
         doc.save(output_path)
         return output_path
     
     @staticmethod
     def _create_heading_styles(doc: Document) -> None:
-        """Create modern heading styles."""
+        """Create modern heading styles that map to Word's built-in heading styles."""
         styles = doc.styles
         
-        # Heading 1 - Modern, clean style
-        if 'Heading 1' in styles:
-            h1_style = styles['Heading 1']
-        else:
-            h1_style = styles.add_style('Heading 1', WD_STYLE_TYPE.PARAGRAPH)
+        # Configure built-in heading styles (这些是Word内置的标题样式)
+        heading_configs = [
+            ('Heading 1', 18, 12, 6),
+            ('Heading 2', 14, 10, 4), 
+            ('Heading 3', 12, 8, 3),
+            ('Heading 4', 11, 6, 3),
+            ('Heading 5', 11, 6, 3),
+            ('Heading 6', 11, 6, 3)
+        ]
         
-        h1_font = h1_style.font
-        h1_font.name = 'Calibri'
-        h1_font.size = Pt(18)
-        h1_font.bold = True
-        h1_font.color.rgb = None  # Use theme color
-        
-        h1_paragraph = h1_style.paragraph_format
-        h1_paragraph.space_before = Pt(12)
-        h1_paragraph.space_after = Pt(6)
-        
-        # Heading 2
-        if 'Heading 2' in styles:
-            h2_style = styles['Heading 2']
-        else:
-            h2_style = styles.add_style('Heading 2', WD_STYLE_TYPE.PARAGRAPH)
-            
-        h2_font = h2_style.font
-        h2_font.name = 'Calibri'
-        h2_font.size = Pt(14)
-        h2_font.bold = True
-        
-        h2_paragraph = h2_style.paragraph_format
-        h2_paragraph.space_before = Pt(10)
-        h2_paragraph.space_after = Pt(4)
+        for style_name, font_size, space_before, space_after in heading_configs:
+            try:
+                # Use existing built-in style or create if not exists
+                if style_name in styles:
+                    heading_style = styles[style_name]
+                else:
+                    heading_style = styles.add_style(style_name, WD_STYLE_TYPE.PARAGRAPH)
+                
+                # Configure font
+                heading_font = heading_style.font
+                heading_font.name = 'Calibri'
+                heading_font.size = Pt(font_size)
+                heading_font.bold = True
+                heading_font.color.rgb = None  # Use theme color
+                
+                # Configure paragraph formatting
+                heading_paragraph = heading_style.paragraph_format
+                heading_paragraph.space_before = Pt(space_before)
+                heading_paragraph.space_after = Pt(space_after)
+                heading_paragraph.keep_with_next = True  # Keep heading with following paragraph
+                
+            except Exception as e:
+                # Skip if style already exists or cannot be modified
+                continue
     
     @staticmethod
     def _create_paragraph_styles(doc: Document) -> None:
