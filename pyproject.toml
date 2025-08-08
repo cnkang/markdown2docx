@@ -1,0 +1,23 @@
+[project]
+name = "markdown2docx"
+version = "0.1.0"
+description = "Convert Markdown files to DOCX format"
+requires-python = ">=3.13"
+dependencies = [
+    "pypandoc>=1.13",
+    "python-docx>=1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
