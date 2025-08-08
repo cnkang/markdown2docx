@@ -102,6 +102,7 @@ name = "markdown2docx"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "lxml" },
     { name = "pypandoc" },
     { name = "python-docx" },
 ]
@@ -114,8 +115,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "lxml", specifier = ">=5.0.0" },
     { name = "pypandoc", specifier = ">=1.13" },
-    { name = "python-docx", specifier = ">=1.1.0" },
+    { name = "python-docx", specifier = ">=1.1.2" },
 ]
 
 [package.metadata.requires-dev]
