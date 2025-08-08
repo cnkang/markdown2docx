@@ -1,40 +1,147 @@
-# Example Document
+# 现代Markdown到DOCX转换示例
 
-This is an **example** Markdown document for testing conversion functionality.
+这是一个展示现代Markdown功能的**示例**文档，用于测试转换到最新DOCX标准的功能。
 
-## Feature Showcase
+## 文本格式化功能
 
-### Text Formatting
+### 基础格式
 
-- **Bold text**
-- *Italic text*
-- `Code snippet`
+- **粗体文本**
+- *斜体文本*
+- ~~删除线文本~~
+- `行内代码`
+- 上标：E=mc^2^
+- 下标：H~2~O
 
-### Lists
+### 高级格式
 
-1. Ordered list item 1
-2. Ordered list item 2
-   - Nested unordered list
-   - Another nested item
+> 这是一个引用块，用于突出显示重要信息。
+> 
+> 可以包含多个段落。
 
-### Code Blocks
+## 列表功能
+
+### 无序列表
+
+- 第一项
+- 第二项
+  - 嵌套项目
+  - 另一个嵌套项目
+    - 更深层嵌套
+
+### 有序列表
+
+1. 第一步
+2. 第二步
+3. 第三步
+
+### 任务列表
+
+- [x] 已完成的任务
+- [ ] 待完成的任务
+- [ ] 另一个待完成的任务
+
+## 代码块
+
+### Python代码
 
 ```python
-def hello_world():
-    print("Hello, World!")
+def convert_markdown_to_docx(input_file, output_file):
+    """现代化的转换函数"""
+    converter = MarkdownToDocxConverter()
+    return converter.convert(input_file, output_file)
+
+# 使用示例
+result = convert_markdown_to_docx("example.md", "output.docx")
+print(f"转换完成: {result}")
 ```
 
-### Links and Images
+### JSON配置
 
-[GitHub](https://github.com)
+```json
+{
+  "converter": {
+    "format": "docx",
+    "template": "modern_template.docx",
+    "options": {
+      "toc": true,
+      "toc_depth": 3,
+      "preserve_formatting": true
+    }
+  }
+}
+```
 
-### Tables
+## 表格功能
 
-| Column 1 | Column 2 | Column 3 |
-|----------|----------|----------|
-| Data 1   | Data 2   | Data 3   |
-| Data 4   | Data 5   | Data 6   |
+### 基础表格
 
-## Conclusion
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 标题 | ✅ | 支持多级标题 |
+| 列表 | ✅ | 支持所有类型 |
+| 代码 | ✅ | 语法高亮 |
+| 表格 | ✅ | 现代样式 |
 
-This tool can effectively convert Markdown to DOCX format.
+### 复杂表格
+
+| 转换器版本 | Pandoc版本 | DOCX标准 | 兼容性 |
+|:-----------|:----------:|:--------:|-------:|
+| v0.1.0 | 2.19+ | Office 2019+ | 完全兼容 |
+| v0.1.0 | 2.10-2.18 | Office 2016+ | 基本兼容 |
+| v0.1.0 | < 2.10 | Office 2013+ | 有限支持 |
+
+## 链接和引用
+
+### 外部链接
+
+访问 [GitHub](https://github.com) 获取更多信息。
+
+### 内部链接
+
+参见 [文本格式化功能](#文本格式化功能) 部分。
+
+### 脚注
+
+这里有一个脚注引用[^1]，还有另一个[^note]。
+
+[^1]: 这是第一个脚注的内容。
+
+[^note]: 这是一个命名脚注，包含更详细的说明信息。
+
+## 数学公式
+
+行内公式：$E = mc^2$
+
+块级公式：
+
+$$
+\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
+$$
+
+## 定义列表
+
+术语1
+:   这是术语1的定义。
+
+术语2
+:   这是术语2的定义。
+:   可以有多个定义段落。
+
+## 分隔线
+
+---
+
+## 结论
+
+这个工具能够有效地将现代Markdown功能转换为符合最新标准的DOCX格式，支持：
+
+1. **现代文本格式** - 包括删除线、上下标等
+2. **增强的代码支持** - 语法高亮和多语言支持  
+3. **高级表格** - 对齐和复杂布局
+4. **任务列表** - 交互式复选框
+5. **脚注和引用** - 学术文档支持
+6. **数学公式** - LaTeX语法支持
+7. **模板系统** - 一致的样式和格式
+
+通过使用最新的Pandoc版本和现代DOCX模板，确保输出文档符合当前的办公软件标准。
