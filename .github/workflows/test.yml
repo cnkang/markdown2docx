@@ -15,9 +15,16 @@ jobs:
       uses: astral-sh/setup-uv@v3
       with:
         version: "latest"
+        enable-cache: true
     
     - name: Set up Python
       run: uv python install 3.13
+    
+    - name: Cache Pandoc
+      uses: actions/cache@v4
+      with:
+        path: ~/.local/bin/pandoc
+        key: pandoc-${{ runner.os }}-2.19
     
     - name: Set up environment
       run: ./scripts/setup-env.sh --group dev
