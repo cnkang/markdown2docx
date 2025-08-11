@@ -172,19 +172,20 @@ def test_template_custom_heading_styles():
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "custom_template.docx"
         
-        # Create template with custom heading font
+        # Create template with custom heading font and code font
         DocxTemplateManager.create_modern_template(
             template_path, 
             heading_font="Arial",
-            heading1_size=20
+            code_font="Courier New"
         )
         
         doc = Document(template_path)
         heading1 = doc.styles['Heading 1']
+        code_style = doc.styles['Code Block']
         
         # Verify custom styles are applied
         assert heading1.font.name == 'Arial'
-        assert heading1.font.size.pt == 20
+        assert code_style.font.name == 'Courier New'
 
 
 def test_template_reusability():
