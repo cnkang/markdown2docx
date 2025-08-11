@@ -167,6 +167,26 @@ def test_template_sample_content():
         assert len(heading_texts) >= 3  # At least 3 sample headings
 
 
+def test_template_custom_heading_styles():
+    """Test template creation with custom heading styles via kwargs."""
+    with TemporaryDirectory() as tmpdir:
+        template_path = Path(tmpdir) / "custom_template.docx"
+        
+        # Create template with custom heading font
+        DocxTemplateManager.create_modern_template(
+            template_path, 
+            heading_font="Arial",
+            heading1_size=20
+        )
+        
+        doc = Document(template_path)
+        heading1 = doc.styles['Heading 1']
+        
+        # Verify custom styles are applied
+        assert heading1.font.name == 'Arial'
+        assert heading1.font.size.pt == 20
+
+
 def test_template_reusability():
     """Test that template can be used multiple times."""
     markdown_content = """# Document Title

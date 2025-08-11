@@ -179,6 +179,26 @@ def test_toc_generation(complex_markdown):
         assert output_path.exists()
 
 
+def test_missing_template_handling(complex_markdown, caplog):
+    """Test that missing template files are handled gracefully with warnings."""
+    with TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        input_path = tmpdir_path / "test.md"
+        nonexistent_template = tmpdir_path / "missing_template.docx"
+        
+        input_path.write_text(complex_markdown)
+        
+        # Use converter with non-existent template
+        converter = MarkdownToDocxConverter(reference_doc=nonexistent_template)
+        result = converter.convert(input_path)
+        
+        # Conversion should complete successfully
+        assert result.exists()
+        
+        # Warning should be logged
+        assert "Reference DOCX not found" in caplog.text
+
+
 def test_multilingual_conversion():
     """Test conversion of multilingual content."""
     multilingual_content = """# Multilingual Test 多语言测试
