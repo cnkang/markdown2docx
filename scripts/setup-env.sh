@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -e
 
+# Check if 'uv' is installed
+if ! command -v uv >/dev/null 2>&1; then
+  echo "Error: 'uv' is not installed or not found in your PATH."
+  echo "Please install 'uv' by following instructions at https://github.com/astral-sh/uv or run:"
+  echo "  pip install uv"
+  exit 1
+fi
+
 # Install Python dependencies using uv, allowing additional arguments (e.g., --group dev)
 uv sync "$@"
 
