@@ -19,11 +19,8 @@ jobs:
     - name: Set up Python
       run: uv python install 3.13
     
-    - name: Install dependencies
-      run: uv sync --group dev
-    
-    - name: Install pandoc
-      run: sudo apt-get update && sudo apt-get install -y pandoc
+    - name: Set up environment
+      run: ./scripts/setup-env.sh --group dev
     
     - name: Run tests
       run: uv run pytest --cov=src

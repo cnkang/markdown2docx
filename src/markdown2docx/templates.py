@@ -41,16 +41,24 @@ class DocxTemplateManager:
         self.heading_font = heading_font
         self.code_font = code_font
 
-    def create_modern_template(self, output_path: str | Path, *, add_sample: bool = False) -> Path:
-        """Create a modern DOCX template.
+    @classmethod
+    def create_modern_template(
+        cls,
+        output_path: str | Path,
+        *,
+        add_sample: bool = False,
+        **kwargs,
+    ) -> Path:
+        """Create a modern DOCX template using default settings.
 
-        Args:
-            output_path: Where to save the template (e.g., reference.docx).
-            add_sample: If True, inserts minimal sample content to preview styles.
-
-        Returns:
-            Path to the created DOCX file.
+        This convenience classmethod instantiates ``DocxTemplateManager`` with
+        optional keyword arguments and generates a template at ``output_path``.
         """
+        manager = cls(**kwargs)
+        return manager._create_modern_template(output_path, add_sample=add_sample)
+
+    def _create_modern_template(self, output_path: str | Path, *, add_sample: bool = False) -> Path:
+        """Internal helper to build the template on disk."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -105,9 +113,9 @@ class DocxTemplateManager:
         # Sizes chosen for readability; adjust as desired
         heading_specs = [
             ("Heading 1", 18, True, 12, 6),
-            ("Heading 2", 16, True, 10, 4),
-            ("Heading 3", 14, True, 8, 3),
-            ("Heading 4", 12, True, 6, 3),
+            ("Heading 2", 14, True, 10, 4),
+            ("Heading 3", 12, True, 8, 3),
+            ("Heading 4", 11, True, 6, 3),
             ("Heading 5", 11, False, 6, 3),
             ("Heading 6", 11, False, 6, 3),
         ]
@@ -196,5 +204,4 @@ class DocxTemplateManager:
     @classmethod
     def create_default_template(cls, output_path: str | Path) -> Path:
         """Create a modern DOCX template with default settings (backward compatibility)."""
-        manager = cls()
-        return manager.create_modern_template(output_path, add_sample=True)
+        return cls.create_modern_template(output_path, add_sample=True)

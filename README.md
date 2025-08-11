@@ -18,7 +18,21 @@ A Python tool for converting Markdown files to modern DOCX format Word documents
 
 ## Installation
 
-Install dependencies using uv:
+Run the setup script to install dependencies and ensure Pandoc is available:
+
+```bash
+./scripts/setup-env.sh
+```
+
+**Note:** The setup script is designed for Unix-like systems (Linux, macOS). Windows users should install dependencies manually.
+
+To include development dependencies (e.g., for running tests), pass additional `uv sync` options:
+
+```bash
+./scripts/setup-env.sh --group dev
+```
+
+Or install dependencies manually using uv:
 
 ```bash
 uv sync
@@ -73,9 +87,10 @@ output_path = converter.convert("input.md", "output.docx")
 
 # Conversion with options
 output_path = converter.convert(
-    "input.md", 
+    "input.md",
     "output.docx",
-    **{"--toc": True, "--toc-depth": 3}
+    toc=True,
+    toc_depth=3,
 )
 
 # Create modern template

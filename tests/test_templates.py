@@ -10,6 +10,8 @@ from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 import sys
 from pathlib import Path
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from markdown2docx.templates import DocxTemplateManager
@@ -21,7 +23,7 @@ def test_create_modern_template():
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "modern_template.docx"
         
-        result = DocxTemplateManager.create_modern_template(template_path)
+        result = DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         
         assert result == template_path
         assert template_path.exists()
@@ -42,7 +44,7 @@ def test_template_heading_styles():
     """Test that template has properly configured heading styles."""
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
-        DocxTemplateManager.create_modern_template(template_path)
+        DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         
         doc = Document(template_path)
         
@@ -62,7 +64,7 @@ def test_template_paragraph_styles():
     """Test that template has properly configured paragraph styles."""
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
-        DocxTemplateManager.create_modern_template(template_path)
+        DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         
         doc = Document(template_path)
         
@@ -76,7 +78,7 @@ def test_template_margins():
     """Test that template has correct margin settings."""
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
-        DocxTemplateManager.create_modern_template(template_path)
+        DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         
         doc = Document(template_path)
         section = doc.sections[0]
@@ -110,7 +112,7 @@ Final content.
         output_path = tmpdir_path / "output.docx"
         
         # Create template and input file
-        DocxTemplateManager.create_modern_template(template_path)
+        DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         input_path.write_text(markdown_content)
         
         # Convert using template
@@ -137,7 +139,7 @@ def test_template_code_style():
     """Test that template includes code block style."""
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
-        DocxTemplateManager.create_modern_template(template_path)
+        DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         
         doc = Document(template_path)
         style_names = [style.name for style in doc.styles]
@@ -154,8 +156,7 @@ def test_template_sample_content():
     """Test that template contains sample content for structure."""
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
-        DocxTemplateManager.create_modern_template(template_path)
-        
+        DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         doc = Document(template_path)
         
         # Should have some sample content
@@ -164,6 +165,27 @@ def test_template_sample_content():
         # Check for sample headings
         heading_texts = [p.text for p in doc.paragraphs if p.style and 'heading' in p.style.name.lower()]
         assert len(heading_texts) >= 3  # At least 3 sample headings
+
+
+def test_template_custom_heading_styles():
+    """Test template creation with custom heading styles via kwargs."""
+    with TemporaryDirectory() as tmpdir:
+        template_path = Path(tmpdir) / "custom_template.docx"
+        
+        # Create template with custom heading font and code font
+        DocxTemplateManager.create_modern_template(
+            template_path, 
+            heading_font="Arial",
+            code_font="Courier New"
+        )
+        
+        doc = Document(template_path)
+        heading1 = doc.styles['Heading 1']
+        code_style = doc.styles['Code Block']
+        
+        # Verify custom styles are applied
+        assert heading1.font.name == 'Arial'
+        assert code_style.font.name == 'Courier New'
 
 
 def test_template_reusability():
@@ -196,10 +218,9 @@ This is test content.
 
 def test_template_error_handling():
     """Test template creation error handling."""
-    # Test with invalid path (should still work, creating directories)
+    # Test with path in a non-existent directory (should create directories)
     with TemporaryDirectory() as tmpdir:
         invalid_path = Path(tmpdir) / "nonexistent" / "template.docx"
-        
-        # This should fail because parent directory doesn't exist
-        with pytest.raises(FileNotFoundError):
-            DocxTemplateManager.create_modern_template(invalid_path)
+
+        result = DocxTemplateManager.create_modern_template(invalid_path)
+        assert result.exists()

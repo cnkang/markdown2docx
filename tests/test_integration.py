@@ -169,13 +169,34 @@ def test_toc_generation(complex_markdown):
         
         converter = MarkdownToDocxConverter()
         result = converter.convert(
-            input_path, 
+            input_path,
             output_path,
-            **{'--toc': True, '--toc-depth': 2}
+            toc=True,
+            toc_depth=2,
         )
         
         assert result == output_path
         assert output_path.exists()
+
+
+def test_missing_template_handling(complex_markdown, caplog):
+    """Test that missing template files are handled gracefully with warnings."""
+    with TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        input_path = tmpdir_path / "test.md"
+        nonexistent_template = tmpdir_path / "missing_template.docx"
+        
+        input_path.write_text(complex_markdown)
+        
+        # Use converter with non-existent template
+        converter = MarkdownToDocxConverter(reference_doc=nonexistent_template)
+        result = converter.convert(input_path)
+        
+        # Conversion should complete successfully
+        assert result.exists()
+        
+        # Warning should be logged
+        assert "Reference DOCX not found" in caplog.text
 
 
 def test_multilingual_conversion():
@@ -220,8 +241,12 @@ This paragraph contains both English and 中文 characters in the same line.
         
         # Verify multilingual content is preserved
         doc = Document(output_path)
-        full_text = '\n'.join([p.text for p in doc.paragraphs])
-        
+        full_text = '\n'.join(p.text for p in doc.paragraphs)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    full_text += '\n' + cell.text
+
         assert '多语言测试' in full_text
         assert '中文部分' in full_text
         assert '你好世界' in full_text
