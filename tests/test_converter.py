@@ -155,3 +155,25 @@ def test_converter_with_reference_doc(sample_markdown):
         
         converter = MarkdownToDocxConverter(reference_doc=template_path)
         assert converter.reference_doc == template_path
+
+
+def test_convert_with_template_method(converter, sample_markdown):
+    """Test the convert_with_template method directly."""
+    with TemporaryDirectory() as tmpdir:
+        input_path = Path(tmpdir) / "test.md"
+        template_path = Path(tmpdir) / "template.docx"
+        output_path = Path(tmpdir) / "output.docx"
+        
+        input_path.write_text(sample_markdown)
+        DocxTemplateManager.create_modern_template(template_path)
+        
+        # Test convert_with_template method
+        result = converter.convert_with_template(
+            input_path,
+            template_path,
+            output_path,
+            toc=True
+        )
+        
+        assert result == output_path
+        assert output_path.exists()
