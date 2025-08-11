@@ -14,6 +14,8 @@ try:
 except ImportError:
     Version = None  # Converter still works without packaging; only strict compare is skipped
 
+# Configure logger
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
@@ -33,6 +35,10 @@ class MarkdownToDocxConverter:
         "+fenced_divs"
         "+bracketed_spans"
     )
+
+    def _get_modern_docx_args(self) -> list[str]:
+        """Base Pandoc arguments for modern DOCX output."""
+        return ["-f", self._DEFAULT_MD_READER, "-t", "docx+styles"]
 
     def __init__(self, reference_doc: Optional[str | Path] = None, min_pandoc: str = "2.19"):
         """
@@ -80,7 +86,7 @@ class MarkdownToDocxConverter:
             Path to the generated DOCX file.
 
         Raises:
-            FileNotFoundError: If the input file (or reference doc) does not exist.
+            FileNotFoundError: If the input file does not exist.
             RuntimeError: If Pandoc is missing or conversion/validation fails.
         """
         input_path = Path(input_path)
@@ -115,13 +121,14 @@ class MarkdownToDocxConverter:
         self, *, toc: bool, toc_depth: int, extra_args: Optional[Sequence[str]]
     ) -> list[str]:
         """Build a predictable set of Pandoc arguments for DOCX output."""
-        args: list[str] = ["-f", self._DEFAULT_MD_READER]
+        args = self._get_modern_docx_args()
 
         # Use a reference DOCX to control styles (headings, captions, code, etc.)
         if self.reference_doc:
-            if not self.reference_doc.exists():
-                raise FileNotFoundError(f"Reference DOCX not found: {self.reference_doc}")
-            args.extend(["--reference-doc", str(self.reference_doc)])
+            if self.reference_doc.exists():
+                args.extend(["--reference-doc", str(self.reference_doc)])
+            else:
+                log.warning("Reference DOCX not found: %s. Proceeding without it.", self.reference_doc)
 
         # Optional ToC
         if toc:
@@ -137,6 +144,19 @@ class MarkdownToDocxConverter:
             args.extend(extra_args)
 
         return args
+
+    def convert_with_template(
+        self,
+        input_path: str | Path,
+        template_path: str | Path,
+        output_path: Optional[str | Path] = None,
+        **kwargs,
+    ) -> Path:
+        """Convenience wrapper to convert using a given template."""
+        temp_converter = MarkdownToDocxConverter(
+            reference_doc=template_path, min_pandoc=self.min_pandoc
+        )
+        return temp_converter.convert(input_path, output_path, **kwargs)
 
     def _validate_docx(self, path: Path) -> None:
         """

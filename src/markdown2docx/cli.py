@@ -28,7 +28,7 @@ Examples:
                        help="Create a modern DOCX template")
     parser.add_argument("--toc", action="store_true",
                        help="Include table of contents")
-    parser.add_argument("--toc-depth", type=int, default=3,
+    parser.add_argument("--toc-depth", "--toc_depth", type=int, default=3,
                        help="Table of contents depth (default: 3)")
     
     args = parser.parse_args()
@@ -49,8 +49,8 @@ Examples:
     # Prepare conversion options
     options = {}
     if args.toc:
-        options['--toc'] = True
-        options['--toc-depth'] = args.toc_depth
+        options['toc'] = True
+        options['toc_depth'] = getattr(args, 'toc_depth', None) or args.toc_depth
     
     try:
         output_path = converter.convert(args.input, args.output, **options)
