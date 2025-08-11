@@ -24,6 +24,8 @@ Run the setup script to install dependencies and ensure Pandoc is available:
 ./scripts/setup-env.sh
 ```
 
+**Note:** The setup script is designed for Unix-like systems (Linux, macOS). Windows users should install dependencies manually.
+
 To include development dependencies (e.g., for running tests), pass additional `uv sync` options:
 
 ```bash
