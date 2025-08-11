@@ -43,7 +43,22 @@ def run_cli_command(args):
         cwd=repo_root,
         capture_output=True,
         text=True,
-    )
+"""Helper function to run CLI commands from repository root."""
+    repo_root = Path(__file__).resolve().parent.parent
+    cmd = [sys.executable, "-m", "src.markdown2docx.cli"] + args
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"Command failed with return code {e.returncode}")
+        print(f"Error output: {e.stderr}")
+        return e
+    return result
     return result
 
 
