@@ -169,9 +169,10 @@ def test_toc_generation(complex_markdown):
         
         converter = MarkdownToDocxConverter()
         result = converter.convert(
-            input_path, 
+            input_path,
             output_path,
-            **{'--toc': True, '--toc-depth': 2}
+            toc=True,
+            toc_depth=2,
         )
         
         assert result == output_path
@@ -220,8 +221,12 @@ This paragraph contains both English and 中文 characters in the same line.
         
         # Verify multilingual content is preserved
         doc = Document(output_path)
-        full_text = '\n'.join([p.text for p in doc.paragraphs])
-        
+        full_text = '\n'.join(p.text for p in doc.paragraphs)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    full_text += '\n' + cell.text
+
         assert '多语言测试' in full_text
         assert '中文部分' in full_text
         assert '你好世界' in full_text

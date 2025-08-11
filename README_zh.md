@@ -18,7 +18,19 @@
 
 ## 安装
 
-使用uv安装依赖：
+运行脚本安装依赖并确保系统有 Pandoc：
+
+```bash
+./scripts/setup-env.sh
+```
+
+如需包含开发依赖（例如运行测试），可以传入额外的 `uv sync` 参数：
+
+```bash
+./scripts/setup-env.sh --group dev
+```
+
+或者手动使用uv安装依赖：
 
 ```bash
 uv sync
@@ -73,9 +85,10 @@ output_path = converter.convert("input.md", "output.docx")
 
 # 带选项的转换
 output_path = converter.convert(
-    "input.md", 
+    "input.md",
     "output.docx",
-    **{"--toc": True, "--toc-depth": 3}
+    toc=True,
+    toc_depth=3,
 )
 
 # 创建现代模板

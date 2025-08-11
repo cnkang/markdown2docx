@@ -34,14 +34,15 @@ def hello():
 """
 
 
-def run_cli_command(args, cwd=None):
-    """Helper function to run CLI commands."""
+def run_cli_command(args):
+    """Helper function to run CLI commands from repository root."""
+    repo_root = Path(__file__).resolve().parent.parent
     cmd = [sys.executable, "-m", "src.markdown2docx.cli"] + args
     result = subprocess.run(
-        cmd, 
-        cwd=cwd,
-        capture_output=True, 
-        text=True
+        cmd,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
     )
     return result
 
@@ -53,7 +54,7 @@ def test_cli_basic_conversion(sample_markdown_content):
         input_file = tmpdir_path / "test.md"
         input_file.write_text(sample_markdown_content)
         
-        result = run_cli_command([str(input_file)], cwd=tmpdir_path.parent)
+        result = run_cli_command([str(input_file)])
         
         assert result.returncode == 0
         assert "Successfully converted" in result.stdout
@@ -71,9 +72,9 @@ def test_cli_custom_output(sample_markdown_content):
         input_file.write_text(sample_markdown_content)
         
         result = run_cli_command([
-            str(input_file), 
+            str(input_file),
             "-o", str(output_file)
-        ], cwd=tmpdir_path.parent)
+        ])
         
         assert result.returncode == 0
         assert output_file.exists()
@@ -87,7 +88,7 @@ def test_cli_template_creation():
         
         result = run_cli_command([
             "--create-template", str(template_file)
-        ], cwd=tmpdir_path.parent)
+        ])
         
         assert result.returncode == 0
         assert "Created modern DOCX template" in result.stdout
@@ -105,14 +106,14 @@ def test_cli_with_template(sample_markdown_content):
         # First create template
         result = run_cli_command([
             "--create-template", str(template_file)
-        ], cwd=tmpdir_path.parent)
+        ])
         assert result.returncode == 0
         
         # Then use template for conversion
         result = run_cli_command([
             str(input_file),
             "--template", str(template_file)
-        ], cwd=tmpdir_path.parent)
+        ])
         
         assert result.returncode == 0
         assert "Used template" in result.stdout
@@ -129,7 +130,7 @@ def test_cli_with_toc(sample_markdown_content):
             str(input_file),
             "--toc",
             "--toc-depth", "2"
-        ], cwd=tmpdir_path.parent)
+        ])
         
         assert result.returncode == 0
         assert "Successfully converted" in result.stdout
