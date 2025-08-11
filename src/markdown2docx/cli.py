@@ -49,8 +49,8 @@ Examples:
     # Prepare conversion options
     options = {}
     if args.toc:
-        options['--toc'] = True
-        options['--toc-depth'] = args.toc_depth
+        options['toc'] = True
+        options['toc_depth'] = args.toc_depth
     
     try:
         output_path = converter.convert(args.input, args.output, **options)

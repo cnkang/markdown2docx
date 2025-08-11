@@ -105,8 +105,9 @@ def test_convert_with_options(converter, sample_markdown):
         input_path.write_text(sample_markdown)
         
         output_path = converter.convert(
-            input_path, 
-            **{'--toc': True, '--toc-depth': 2}
+            input_path,
+            toc=True,
+            toc_depth=2,
         )
         
         assert output_path.exists()
