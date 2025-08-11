@@ -14,6 +14,8 @@ try:
 except ImportError:
     Version = None  # Converter still works without packaging; only strict compare is skipped
 
+# Configure logger
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
