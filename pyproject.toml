@@ -2,7 +2,22 @@
 name = "markdown2docx"
 version = "0.1.0"
 description = "Convert Markdown files to DOCX format with modern standards support"
+authors = [
+    {name = "markdown2docx contributors"}
+]
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.13"
+keywords = ["markdown", "docx", "pandoc", "conversion", "document"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Markup",
+    "Topic :: Office/Business :: Office Suites",
+]
 dependencies = [
     "pypandoc>=1.15",
     "python-docx>=1.2.0",
@@ -10,10 +25,33 @@ dependencies = [
     "packaging>=25.0",  # For version comparison
 ]
 
+[project.urls]
+Homepage = "https://github.com/yourusername/markdown2docx"
+Repository = "https://github.com/yourusername/markdown2docx"
+Issues = "https://github.com/yourusername/markdown2docx/issues"
+
+[project.scripts]
+markdown2docx = "markdown2docx.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.4.1",
     "pytest-cov>=6.2.1",
+    "black>=24.0.0",
+    "isort>=5.13.0",
+    "mypy>=1.8.0",
+    "pylint>=3.0.0",
+    "pre-commit>=3.6.0",
+]
+docs = [
+    "sphinx>=7.0.0",
+    "sphinx-rtd-theme>=2.0.0",
+    "myst-parser>=2.0.0",
+]
+test = [
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
+    "pytest-xdist>=3.5.0",
 ]
 
 [build-system]
@@ -23,9 +61,102 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --cov=src --cov-report=term-missing --cov-report=html"
 markers = [
     "integration: marks tests as integration tests",
-    "cli: marks tests as CLI tests",
-    "template: marks tests as template tests"
+    "cli: marks tests as CLI tests", 
+    "template: marks tests as template tests",
+    "slow: marks tests as slow running",
 ]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py313']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["markdown2docx"]
+known_third_party = ["pypandoc", "docx", "lxml", "packaging"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "pypandoc.*",
+    "docx.*",
+    "lxml.*",
+]
+ignore_missing_imports = true
+
+[tool.pylint.messages_control]
+disable = [
+    "too-few-public-methods",
+    "too-many-arguments", 
+    "too-many-instance-attributes",
+    "line-too-long",  # handled by black
+    "missing-module-docstring",  # handled by our docstring standards
+]
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint.design]
+max-args = 8
+max-locals = 20
+max-returns = 8
+max-branches = 15
+max-statements = 60
