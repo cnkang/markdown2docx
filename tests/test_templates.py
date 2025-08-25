@@ -3,41 +3,42 @@
 模板系统测试，确保DOCX模板创建和使用功能正常。
 """
 
-import pytest
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from docx import Document
-from docx.enum.style import WD_STYLE_TYPE
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
 import pytest
+from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from markdown2docx.templates import DocxTemplateManager
 from markdown2docx.converter import MarkdownToDocxConverter
+from markdown2docx.templates import DocxTemplateManager
 
 
 def test_create_modern_template():
     """Test modern template creation with all required styles."""
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "modern_template.docx"
-        
-        result = DocxTemplateManager.create_modern_template(template_path, add_sample=True)
-        
+
+        result = DocxTemplateManager.create_modern_template(
+            template_path, add_sample=True
+        )
+
         assert result == template_path
         assert template_path.exists()
-        
+
         # Verify template structure
         doc = Document(template_path)
         style_names = [style.name for style in doc.styles]
-        
+
         # Check that all heading styles exist
         for i in range(1, 7):
-            assert f'Heading {i}' in style_names
-        
+            assert f"Heading {i}" in style_names
+
         # Check basic styles
-        assert 'Normal' in style_names
+        assert "Normal" in style_names
 
 
 def test_template_heading_styles():
@@ -45,17 +46,17 @@ def test_template_heading_styles():
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
         DocxTemplateManager.create_modern_template(template_path, add_sample=True)
-        
+
         doc = Document(template_path)
-        
+
         # Test heading style properties
-        heading1 = doc.styles['Heading 1']
-        assert heading1.font.name == 'Calibri'
+        heading1 = doc.styles["Heading 1"]
+        assert heading1.font.name == "Calibri"
         assert heading1.font.size.pt == 18
         assert heading1.font.bold is True
-        
-        heading2 = doc.styles['Heading 2']
-        assert heading2.font.name == 'Calibri'
+
+        heading2 = doc.styles["Heading 2"]
+        assert heading2.font.name == "Calibri"
         assert heading2.font.size.pt == 14
         assert heading2.font.bold is True
 
@@ -65,12 +66,12 @@ def test_template_paragraph_styles():
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
         DocxTemplateManager.create_modern_template(template_path, add_sample=True)
-        
+
         doc = Document(template_path)
-        
+
         # Test normal style properties
-        normal_style = doc.styles['Normal']
-        assert normal_style.font.name == 'Calibri'
+        normal_style = doc.styles["Normal"]
+        assert normal_style.font.name == "Calibri"
         assert normal_style.font.size.pt == 11
 
 
@@ -79,10 +80,10 @@ def test_template_margins():
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
         DocxTemplateManager.create_modern_template(template_path, add_sample=True)
-        
+
         doc = Document(template_path)
         section = doc.sections[0]
-        
+
         # Check 1-inch margins (914400 EMUs = 1 inch)
         assert section.top_margin.emu == 914400
         assert section.bottom_margin.emu == 914400
@@ -104,35 +105,35 @@ More content here.
 
 Final content.
 """
-    
+
     with TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         template_path = tmpdir_path / "template.docx"
         input_path = tmpdir_path / "test.md"
         output_path = tmpdir_path / "output.docx"
-        
+
         # Create template and input file
         DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         input_path.write_text(markdown_content)
-        
+
         # Convert using template
         converter = MarkdownToDocxConverter(reference_doc=template_path)
         result = converter.convert(input_path, output_path)
-        
+
         assert result == output_path
         assert output_path.exists()
-        
+
         # Verify output uses template styles
         output_doc = Document(output_path)
         headings = []
         for paragraph in output_doc.paragraphs:
-            if paragraph.style and 'heading' in paragraph.style.name.lower():
+            if paragraph.style and "heading" in paragraph.style.name.lower():
                 headings.append((paragraph.text, paragraph.style.name))
-        
+
         assert len(headings) >= 3
-        assert any('Test Heading 1' in h[0] for h in headings)
-        assert any('Test Heading 2' in h[0] for h in headings)
-        assert any('Test Heading 3' in h[0] for h in headings)
+        assert any("Test Heading 1" in h[0] for h in headings)
+        assert any("Test Heading 2" in h[0] for h in headings)
+        assert any("Test Heading 3" in h[0] for h in headings)
 
 
 def test_template_code_style():
@@ -140,15 +141,15 @@ def test_template_code_style():
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "template.docx"
         DocxTemplateManager.create_modern_template(template_path, add_sample=True)
-        
+
         doc = Document(template_path)
         style_names = [style.name for style in doc.styles]
-        
+
         # Code Block style should exist
-        assert 'Code Block' in style_names
-        
-        code_style = doc.styles['Code Block']
-        assert code_style.font.name == 'Consolas'
+        assert "Code Block" in style_names
+
+        code_style = doc.styles["Code Block"]
+        assert code_style.font.name == "Consolas"
         assert code_style.font.size.pt == 9
 
 
@@ -158,12 +159,16 @@ def test_template_sample_content():
         template_path = Path(tmpdir) / "template.docx"
         DocxTemplateManager.create_modern_template(template_path, add_sample=True)
         doc = Document(template_path)
-        
+
         # Should have some sample content
         assert len(doc.paragraphs) > 0
-        
+
         # Check for sample headings
-        heading_texts = [p.text for p in doc.paragraphs if p.style and 'heading' in p.style.name.lower()]
+        heading_texts = [
+            p.text
+            for p in doc.paragraphs
+            if p.style and "heading" in p.style.name.lower()
+        ]
         assert len(heading_texts) >= 3  # At least 3 sample headings
 
 
@@ -171,21 +176,19 @@ def test_template_custom_heading_styles():
     """Test template creation with custom heading styles via kwargs."""
     with TemporaryDirectory() as tmpdir:
         template_path = Path(tmpdir) / "custom_template.docx"
-        
+
         # Create template with custom heading font and code font
         DocxTemplateManager.create_modern_template(
-            template_path, 
-            heading_font="Arial",
-            code_font="Courier New"
+            template_path, heading_font="Arial", code_font="Courier New"
         )
-        
+
         doc = Document(template_path)
-        heading1 = doc.styles['Heading 1']
-        code_style = doc.styles['Code Block']
-        
+        heading1 = doc.styles["Heading 1"]
+        code_style = doc.styles["Code Block"]
+
         # Verify custom styles are applied
-        assert heading1.font.name == 'Arial'
-        assert code_style.font.name == 'Courier New'
+        assert heading1.font.name == "Arial"
+        assert code_style.font.name == "Courier New"
 
 
 def test_template_reusability():
@@ -194,24 +197,24 @@ def test_template_reusability():
 
 This is test content.
 """
-    
+
     with TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         template_path = tmpdir_path / "template.docx"
-        
+
         # Create template once
         DocxTemplateManager.create_modern_template(template_path)
-        
+
         # Use template multiple times
         for i in range(3):
             input_path = tmpdir_path / f"test{i}.md"
             output_path = tmpdir_path / f"output{i}.docx"
-            
+
             input_path.write_text(markdown_content)
-            
+
             converter = MarkdownToDocxConverter(reference_doc=template_path)
             result = converter.convert(input_path, output_path)
-            
+
             assert result == output_path
             assert output_path.exists()
 
