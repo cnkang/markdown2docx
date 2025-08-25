@@ -1,86 +1,215 @@
 """Template management for modern DOCX output.
 
-Goals:
-- Produce a clean, predictable reference DOCX for Pandoc or direct authoring.
-- Configure universally sensible defaults (A4/Letter, 1" margins, GDI-safe fonts).
-- Use built-in Word styles (Heading 1..6, Normal) so downstream tools recognize them.
-- Avoid features python-docx cannot truly control (themes, advanced compatibility) unless done via XML.
+This module provides comprehensive DOCX template creation and management
+with support for modern Word standards, configurable styling, and
+robust error handling.
+
+Features:
+- Modern DOCX template generation with Office 2019+ compatibility
+- Configurable page layouts, fonts, and styling
+- Built-in Word styles for maximum compatibility
+- XML-level customization for advanced features
+- Comprehensive error handling and validation
 """
 
 from __future__ import annotations
 
 import contextlib
+import logging
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Any, Literal, Optional, Union
 
 from docx import Document
-from docx.shared import Inches, Pt, Cm
 from docx.enum.style import WD_STYLE_TYPE
+from docx.shared import Cm, Inches, Pt
 
-# Optional: available page presets
+from .config import DEFAULT_CONFIG, TemplateConfig
+from .exceptions import TemplateError
+
+# Configure logger
+logger = logging.getLogger(__name__)
+
+# Type definitions
 PageSize = Literal["A4", "Letter"]
 
 
 class DocxTemplateManager:
-    """Build a modern, consistent DOCX template for downstream use."""
+    """Manage creation and customization of modern DOCX templates.
+
+    This class provides methods to create DOCX templates with modern styling,
+    proper page layouts, and comprehensive style definitions that work well
+    with Pandoc and other document processing tools.
+
+    Example:
+        Create a basic template:
+        >>> manager = DocxTemplateManager()
+        >>> template_path = manager.create_template("my_template.docx")
+
+        Create with custom settings:
+        >>> manager = DocxTemplateManager(
+        ...     page_size="Letter",
+        ...     body_font="Arial",
+        ...     heading_font="Georgia"
+        ... )
+        >>> template_path = manager.create_template("custom_template.docx")
+    """
 
     def __init__(
         self,
         *,
-        page_size: PageSize = "A4",
-        margin: float = 2.54,  # centimeters (≈1 inch)
-        body_font: str = "Calibri",
-        body_size_pt: int = 11,
-        heading_font: str = "Calibri",
-        code_font: str = "Consolas",
+        config: Optional[TemplateConfig] = None,
+        page_size: Optional[PageSize] = None,
+        margin_cm: Optional[float] = None,
+        body_font: Optional[str] = None,
+        body_size_pt: Optional[int] = None,
+        heading_font: Optional[str] = None,
+        code_font: Optional[str] = None,
+        code_size_pt: Optional[int] = None,
     ) -> None:
-        self.page_size = page_size
-        self.margin_cm = margin
-        self.body_font = body_font
-        self.body_size_pt = body_size_pt
-        self.heading_font = heading_font
-        self.code_font = code_font
+        """Initialize template manager with configuration.
+
+        Args:
+            config: Template configuration object. If None, uses default.
+            page_size: Page size ("A4" or "Letter"). Overrides config if provided.
+            margin_cm: Margin size in centimeters. Overrides config if provided.
+            body_font: Font for body text. Overrides config if provided.
+            body_size_pt: Body text size in points. Overrides config if provided.
+            heading_font: Font for headings. Overrides config if provided.
+            code_font: Font for code blocks. Overrides config if provided.
+            code_size_pt: Code font size in points. Overrides config if provided.
+        """
+        # Use provided config or default
+        base_config = config or DEFAULT_CONFIG.template
+
+        # Override with any explicitly provided parameters
+        self.page_size: PageSize = page_size or base_config.page_size  # type: ignore
+        self.margin_cm = margin_cm or base_config.margin_cm
+        self.body_font = body_font or base_config.body_font
+        self.body_size_pt = body_size_pt or base_config.body_size_pt
+        self.heading_font = heading_font or base_config.heading_font
+        self.code_font = code_font or base_config.code_font
+        self.code_size_pt = code_size_pt or base_config.code_size_pt
+
+        # Validate page size
+        if self.page_size not in ("A4", "Letter"):
+            raise TemplateError(
+                None, f"Invalid page size: {self.page_size}. Must be 'A4' or 'Letter'"
+            )
+
+    def create_template(
+        self,
+        output_path: Union[str, Path],
+        *,
+        add_sample_content: bool = False,
+    ) -> Path:
+        """Create a DOCX template file with configured settings.
+
+        Args:
+            output_path: Path where the template file will be created
+            add_sample_content: Whether to include sample content for preview
+
+        Returns:
+            Path to the created template file
+
+        Raises:
+            TemplateError: If template creation fails
+        """
+        return self._create_template_file(
+            output_path, add_sample_content=add_sample_content
+        )
 
     @classmethod
     def create_modern_template(
         cls,
-        output_path: str | Path,
+        output_path: Union[str, Path],
         *,
         add_sample: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> Path:
-        """Create a modern DOCX template using default settings.
+        """Create a modern DOCX template using default or custom settings.
 
-        This convenience classmethod instantiates ``DocxTemplateManager`` with
-        optional keyword arguments and generates a template at ``output_path``.
+        This convenience class method creates a template manager instance
+        and generates a template file in one step.
+
+        Args:
+            output_path: Path where the template will be created
+            add_sample: Whether to include sample content
+            **kwargs: Additional configuration parameters (see __init__)
+
+        Returns:
+            Path to the created template file
+
+        Raises:
+            TemplateError: If template creation fails
+
+        Example:
+            >>> template_path = DocxTemplateManager.create_modern_template(
+            ...     "modern.docx",
+            ...     page_size="Letter",
+            ...     body_font="Arial"
+            ... )
         """
-        manager = cls(**kwargs)
-        return manager._create_modern_template(output_path, add_sample=add_sample)
+        try:
+            manager = cls(**kwargs)
+            return manager._create_template_file(
+                output_path, add_sample_content=add_sample
+            )
+        except Exception as e:
+            raise TemplateError(
+                str(output_path), f"Failed to create template: {e}"
+            ) from e
 
-    def _create_modern_template(self, output_path: str | Path, *, add_sample: bool = False) -> Path:
-        """Internal helper to build the template on disk."""
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    def _create_template_file(
+        self, output_path: Union[str, Path], *, add_sample_content: bool = False
+    ) -> Path:
+        """Internal method to create the template file.
 
-        doc = Document()
+        Args:
+            output_path: Path where template will be created
+            add_sample_content: Whether to add sample content
 
-        # Page + margin setup (A4 is typical outside US; Letter for US)
-        self._configure_page_layout(doc)
-        # Core styles (Normal + Headings + Code)
-        self._configure_core_styles(doc)
-        # Optional: add minimal content so users see headings etc.
-        if add_sample:
-            self._add_sample_content(doc)
+        Returns:
+            Path to created template
 
-        # Best-effort: set a modern compatibility mode in settings.xml (not exposed by python-docx)
-        self._set_compatibility_mode_xml(doc, mode="16")  # Word 2016/2019+ (best-effort)
+        Raises:
+            TemplateError: If creation fails
+        """
+        try:
+            output_path = Path(output_path)
 
-        doc.save(output_path)
-        return output_path
+            # Ensure output directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            logger.info(f"Creating DOCX template: {output_path}")
+
+            # Create new document
+            doc = Document()
+
+            # Configure document structure and styles
+            self._configure_page_layout(doc)
+            self._configure_core_styles(doc)
+
+            # Add sample content if requested
+            if add_sample_content:
+                self._add_sample_content(doc)
+
+            # Set modern compatibility mode for better Office support
+            self._set_compatibility_mode_xml(doc, mode="16")
+
+            # Save the document
+            doc.save(str(output_path))
+
+            logger.info(f"Successfully created template: {output_path}")
+            return output_path
+
+        except Exception as e:
+            raise TemplateError(
+                str(output_path), f"Failed to create template file: {e}"
+            ) from e
 
     # ---------- Layout & styles ----------
 
-    def _configure_page_layout(self, doc: Document) -> None:
+    def _configure_page_layout(self, doc: Any) -> None:
         """Configure page size and margins."""
         for section in doc.sections:
             # Margins
@@ -97,7 +226,7 @@ class DocxTemplateManager:
                 section.page_width = Inches(8.5)
                 section.page_height = Inches(11.0)
 
-    def _configure_core_styles(self, doc: Document) -> None:
+    def _configure_core_styles(self, doc: Any) -> None:
         """Configure Normal, Heading 1..6, and a Code Block paragraph style."""
         styles = doc.styles
 
@@ -120,7 +249,11 @@ class DocxTemplateManager:
             ("Heading 6", 11, False, 6, 3),
         ]
         for name, size_pt, bold, space_before_pt, space_after_pt in heading_specs:
-            style = styles[name] if name in styles else styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+            style = (
+                styles[name]
+                if name in styles
+                else styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+            )
             style.font.name = self.heading_font
             style.font.size = Pt(size_pt)
             style.font.bold = bold
@@ -142,10 +275,12 @@ class DocxTemplateManager:
         cp.space_before = Pt(6)
         cp.space_after = Pt(6)
 
-    def _add_sample_content(self, doc: Document) -> None:
+    def _add_sample_content(self, doc: Any) -> None:
         """Insert minimal content for preview/testing the template styles."""
         doc.add_heading("Heading 1", level=1)
-        doc.add_paragraph("Body text under Heading 1. Replace or remove this sample content.")
+        doc.add_paragraph(
+            "Body text under Heading 1. Replace or remove this sample content."
+        )
         doc.add_heading("Heading 2", level=2)
         doc.add_paragraph("Body text under Heading 2.")
         doc.add_heading("Heading 3", level=3)
@@ -155,7 +290,7 @@ class DocxTemplateManager:
 
     # ---------- Low-level XML helpers (best-effort) ----------
 
-    def _set_compatibility_mode_xml(self, doc: Document, *, mode: str = "16") -> None:
+    def _set_compatibility_mode_xml(self, doc: Any, *, mode: str = "16") -> None:
         """Set Word compatibility mode via settings.xml (best-effort).
 
         Notes:
@@ -166,16 +301,22 @@ class DocxTemplateManager:
         with contextlib.suppress(Exception):
             # Find settings part
             settings_part = next(
-                (part for part in doc.part._child_parts if 'settings' in str(part.partname)),
-                None
+                (
+                    part
+                    for part in doc.part._child_parts
+                    if "settings" in str(part.partname)
+                ),
+                None,
             )
-            
+
             if not settings_part:
                 return
-                
+
             settings = settings_part._element
             nsmap = settings.nsmap or {}
-            w_ns = nsmap.get('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main')
+            w_ns = nsmap.get(
+                "w", "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            )
             w = f"{{{w_ns}}}"
 
             # Find or create compat element
@@ -188,9 +329,9 @@ class DocxTemplateManager:
             existing = compat.findall(f"{w}compatSetting")
             target = next(
                 (el for el in existing if el.get(f"{w}name") == "compatibilityMode"),
-                None
+                None,
             )
-                    
+
             if target is None:
                 target = settings.makeelement(f"{w}compatSetting")
                 compat.append(target)
@@ -200,7 +341,7 @@ class DocxTemplateManager:
             target.set(f"{w}val", mode)
 
     # ---------- Static method for backward compatibility ----------
-    
+
     @classmethod
     def create_default_template(cls, output_path: str | Path) -> Path:
         """Create a modern DOCX template with default settings (backward compatibility)."""
