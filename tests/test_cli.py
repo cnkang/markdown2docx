@@ -58,6 +58,7 @@ def run_cli_command(args):
 # Basic CLI Integration Tests
 # ============================================================================
 
+
 def test_cli_basic_conversion(sample_markdown_content):
     """Test basic CLI conversion functionality."""
     with TemporaryDirectory() as tmpdir:
@@ -137,7 +138,7 @@ def test_cli_nonexistent_file():
     """Test CLI with nonexistent input file."""
     result = run_cli_command(["nonexistent.md"])
 
-    # CLI should return 0 but log error to stderr
+    assert result.returncode == 1
     assert "Input file not found" in result.stderr
 
 
@@ -165,6 +166,7 @@ def test_cli_no_input():
 # Argument Parser Tests
 # ============================================================================
 
+
 class TestArgumentParser:
     """Test argument parser functionality."""
 
@@ -178,7 +180,7 @@ class TestArgumentParser:
         """Test parser help output contains expected information."""
         parser = create_argument_parser()
         help_text = parser.format_help()
-        
+
         assert "Convert Markdown files to modern DOCX format" in help_text
         assert "--template" in help_text
         assert "--toc" in help_text
@@ -189,27 +191,33 @@ class TestArgumentParser:
         """Test parsing basic arguments."""
         parser = create_argument_parser()
         args = parser.parse_args(["input.md"])
-        
+
         assert args.input == "input.md"
         assert args.output is None
         assert args.template is None
-        assert args.toc is False
+        assert args.toc is None
+        assert args.validate is None
         assert args.verbose is False
 
     def test_parser_all_args(self):
         """Test parsing all available arguments."""
         parser = create_argument_parser()
-        args = parser.parse_args([
-            "input.md",
-            "--output", "output.docx",
-            "--template", "template.docx",
-            "--toc",
-            "--toc-depth", "3",
-            "--validate",
-            "--verbose",
-            "--quiet"
-        ])
-        
+        args = parser.parse_args(
+            [
+                "input.md",
+                "--output",
+                "output.docx",
+                "--template",
+                "template.docx",
+                "--toc",
+                "--toc-depth",
+                "3",
+                "--validate",
+                "--verbose",
+                "--quiet",
+            ]
+        )
+
         assert args.input == "input.md"
         assert args.output == "output.docx"
         assert args.template == "template.docx"
@@ -223,23 +231,23 @@ class TestArgumentParser:
         """Test parsing create template arguments."""
         parser = create_argument_parser()
         args = parser.parse_args(["--create-template", "new_template.docx"])
-        
+
         assert args.create_template == "new_template.docx"
         assert args.input is None
 
     def test_parser_conflicting_args(self):
         """Test parser handles conflicting arguments gracefully."""
         parser = create_argument_parser()
-        # Parser should accept both --validate and --no-validate
+        # Last flag wins when both are provided
         args = parser.parse_args(["input.md", "--validate", "--no-validate"])
-        
-        assert args.validate is True
-        assert args.no_validate is True
+
+        assert args.validate is False
 
 
 # ============================================================================
 # Template Creation Handler Tests
 # ============================================================================
+
 
 class TestHandleTemplateCreation:
     """Test template creation handling."""
@@ -248,9 +256,9 @@ class TestHandleTemplateCreation:
     def test_handle_template_creation_success(self, mock_create):
         """Test successful template creation."""
         mock_create.return_value = Path("created_template.docx")
-        
+
         result = handle_template_creation("new_template.docx", verbose=False)
-        
+
         assert result == 0
         mock_create.assert_called_once_with("new_template.docx", add_sample=True)
 
@@ -258,26 +266,31 @@ class TestHandleTemplateCreation:
     def test_handle_template_creation_verbose(self, mock_create):
         """Test template creation with verbose output."""
         mock_create.return_value = Path("created_template.docx")
-        
+
         with patch("builtins.print") as mock_print:
             result = handle_template_creation("new_template.docx", verbose=True)
-            
+
             assert result == 0
             mock_create.assert_called_once()
-            
+
             # Check verbose output was printed
             print_calls = [call[0][0] for call in mock_print.call_args_list]
-            assert any("Successfully created modern DOCX template" in call for call in print_calls)
+            assert any(
+                "Successfully created modern DOCX template" in call
+                for call in print_calls
+            )
             assert any("Location:" in call for call in print_calls)
 
     @patch("markdown2docx.cli.DocxTemplateManager.create_modern_template")
     def test_handle_template_creation_error(self, mock_create):
         """Test template creation error handling."""
-        mock_create.side_effect = MarkdownToDocxError("Template creation failed", "Details here")
-        
+        mock_create.side_effect = MarkdownToDocxError(
+            "Template creation failed", "Details here"
+        )
+
         with patch("markdown2docx.cli.logger") as mock_logger:
             result = handle_template_creation("new_template.docx", verbose=True)
-            
+
             assert result == 1
             mock_logger.error.assert_called()
 
@@ -285,10 +298,10 @@ class TestHandleTemplateCreation:
     def test_handle_template_creation_unexpected_error(self, mock_create):
         """Test template creation unexpected error handling."""
         mock_create.side_effect = RuntimeError("Unexpected error")
-        
+
         with patch("markdown2docx.cli.logger") as mock_logger:
             result = handle_template_creation("new_template.docx", verbose=False)
-            
+
             assert result == 1
             mock_logger.error.assert_called()
 
@@ -296,6 +309,7 @@ class TestHandleTemplateCreation:
 # ============================================================================
 # Conversion Handler Tests
 # ============================================================================
+
 
 class TestHandleConversion:
     """Test conversion handling."""
@@ -306,15 +320,17 @@ class TestHandleConversion:
             tmp.write("# Test Document\nContent here.")
             tmp.flush()
             input_path = tmp.name
-            
+
             config = MarkdownToDocxConfig()
-            
+
             try:
-                with patch("markdown2docx.cli.MarkdownToDocxConverter") as mock_converter_class:
+                with patch(
+                    "markdown2docx.cli.MarkdownToDocxConverter"
+                ) as mock_converter_class:
                     mock_converter = Mock()
                     mock_converter.convert.return_value = Path("output.docx")
                     mock_converter_class.return_value = mock_converter
-                    
+
                     result = handle_conversion(
                         input_path=input_path,
                         output_path=None,
@@ -323,11 +339,47 @@ class TestHandleConversion:
                         toc_depth=None,
                         validate=None,
                         config=config,
-                        verbose=False
+                        verbose=False,
                     )
-                    
+
                     assert result == 0
                     mock_converter.convert.assert_called_once()
+                    call_kwargs = mock_converter.convert.call_args[1]
+                    assert call_kwargs["toc"] is False
+            finally:
+                Path(input_path).unlink()
+
+    def test_handle_conversion_preserves_toc_default(self):
+        """Test conversion keeps config default when CLI does not set TOC."""
+        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as tmp:
+            tmp.write("# Test Document\nContent here.")
+            tmp.flush()
+            input_path = tmp.name
+
+            config = MarkdownToDocxConfig()
+
+            try:
+                with patch(
+                    "markdown2docx.cli.MarkdownToDocxConverter"
+                ) as mock_converter_class:
+                    mock_converter = Mock()
+                    mock_converter.convert.return_value = Path("output.docx")
+                    mock_converter_class.return_value = mock_converter
+
+                    result = handle_conversion(
+                        input_path=input_path,
+                        output_path=None,
+                        template_path=None,
+                        toc=None,
+                        toc_depth=None,
+                        validate=None,
+                        config=config,
+                        verbose=False,
+                    )
+
+                    assert result == 0
+                    call_kwargs = mock_converter.convert.call_args[1]
+                    assert call_kwargs["toc"] is None
             finally:
                 Path(input_path).unlink()
 
@@ -337,15 +389,17 @@ class TestHandleConversion:
             tmp.write("# Test Document\n## Section 1\nContent here.")
             tmp.flush()
             input_path = tmp.name
-            
+
             config = MarkdownToDocxConfig()
-            
+
             try:
-                with patch("markdown2docx.cli.MarkdownToDocxConverter") as mock_converter_class:
+                with patch(
+                    "markdown2docx.cli.MarkdownToDocxConverter"
+                ) as mock_converter_class:
                     mock_converter = Mock()
                     mock_converter.convert.return_value = Path("output.docx")
                     mock_converter_class.return_value = mock_converter
-                    
+
                     result = handle_conversion(
                         input_path=input_path,
                         output_path="custom_output.docx",
@@ -354,11 +408,11 @@ class TestHandleConversion:
                         toc_depth=4,
                         validate=True,
                         config=config,
-                        verbose=True
+                        verbose=True,
                     )
-                    
+
                     assert result == 0
-                    
+
                     # Verify converter was called with correct arguments
                     mock_converter.convert.assert_called_once()
                     call_kwargs = mock_converter.convert.call_args[1]
@@ -371,12 +425,14 @@ class TestHandleConversion:
     def test_handle_conversion_error(self):
         """Test conversion error handling."""
         config = MarkdownToDocxConfig()
-        
+
         with patch("markdown2docx.cli.MarkdownToDocxConverter") as mock_converter_class:
             mock_converter = Mock()
-            mock_converter.convert.side_effect = MarkdownToDocxError("Conversion failed")
+            mock_converter.convert.side_effect = MarkdownToDocxError(
+                "Conversion failed"
+            )
             mock_converter_class.return_value = mock_converter
-            
+
             with patch("markdown2docx.cli.logger") as mock_logger:
                 result = handle_conversion(
                     input_path="nonexistent.md",
@@ -386,9 +442,9 @@ class TestHandleConversion:
                     toc_depth=None,
                     validate=None,
                     config=config,
-                    verbose=False
+                    verbose=False,
                 )
-                
+
                 assert result == 1
                 mock_logger.error.assert_called()
 
@@ -398,15 +454,17 @@ class TestHandleConversion:
             tmp.write("# Test Document\nContent here.")
             tmp.flush()
             input_path = tmp.name
-            
+
             config = MarkdownToDocxConfig()
-            
+
             try:
-                with patch("markdown2docx.cli.MarkdownToDocxConverter") as mock_converter_class:
+                with patch(
+                    "markdown2docx.cli.MarkdownToDocxConverter"
+                ) as mock_converter_class:
                     mock_converter = Mock()
                     mock_converter.convert.return_value = Path("output.docx")
                     mock_converter_class.return_value = mock_converter
-                    
+
                     with patch("builtins.print") as mock_print:
                         result = handle_conversion(
                             input_path=input_path,
@@ -416,14 +474,17 @@ class TestHandleConversion:
                             toc_depth=2,
                             validate=None,
                             config=config,
-                            verbose=True
+                            verbose=True,
                         )
-                        
+
                         assert result == 0
-                        
+
                         # Check verbose output
                         print_calls = [call[0][0] for call in mock_print.call_args_list]
-                        assert any("Conversion completed successfully" in call for call in print_calls)
+                        assert any(
+                            "Conversion completed successfully" in call
+                            for call in print_calls
+                        )
                         assert any("Input:" in call for call in print_calls)
                         assert any("Output:" in call for call in print_calls)
                         assert any("Template:" in call for call in print_calls)
@@ -435,6 +496,7 @@ class TestHandleConversion:
 # ============================================================================
 # Main Function Tests
 # ============================================================================
+
 
 class TestMainFunction:
     """Test main function integration."""
@@ -452,12 +514,11 @@ class TestMainFunction:
             with patch("markdown2docx.cli.create_argument_parser") as mock_parser:
                 mock_parser_instance = Mock()
                 mock_parser_instance.parse_args.return_value = Mock(
-                    input=None,
-                    create_template=None
+                    input=None, create_template=None
                 )
                 mock_parser_instance.error = Mock(side_effect=SystemExit(2))
                 mock_parser.return_value = mock_parser_instance
-                
+
                 with pytest.raises(SystemExit):
                     main()
 
@@ -466,7 +527,7 @@ class TestMainFunction:
         with patch("sys.argv", ["markdown2docx", "--create-template", "template.docx"]):
             with patch("markdown2docx.cli.handle_template_creation") as mock_handle:
                 mock_handle.return_value = 0
-                
+
                 main()  # Should not raise SystemExit
                 mock_handle.assert_called_once_with("template.docx", False)
 
@@ -476,12 +537,12 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
-            
+
             try:
                 with patch("sys.argv", ["markdown2docx", input_path]):
                     with patch("markdown2docx.cli.handle_conversion") as mock_handle:
                         mock_handle.return_value = 0
-                        
+
                         main()  # Should not raise SystemExit
                         mock_handle.assert_called_once()
             finally:
@@ -493,18 +554,20 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
-            
+
             try:
                 with patch("sys.argv", ["markdown2docx", input_path, "--verbose"]):
                     with patch("markdown2docx.cli.load_config") as mock_load_config:
                         mock_config = MarkdownToDocxConfig()
                         mock_load_config.return_value = mock_config
-                        
-                        with patch("markdown2docx.cli.handle_conversion") as mock_handle:
+
+                        with patch(
+                            "markdown2docx.cli.handle_conversion"
+                        ) as mock_handle:
                             mock_handle.return_value = 0
-                            
+
                             main()  # Should not raise SystemExit
-                            
+
                             # Verify config was loaded and passed to handle_conversion
                             mock_load_config.assert_called_once()
                             call_kwargs = mock_handle.call_args[1]
@@ -519,37 +582,40 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
-            
+
             try:
                 # Test --validate option
                 with patch("sys.argv", ["markdown2docx", input_path, "--validate"]):
                     with patch("markdown2docx.cli.handle_conversion") as mock_handle:
                         mock_handle.return_value = 0
-                        
+
                         main()
-                        
+
                         call_kwargs = mock_handle.call_args[1]
                         assert call_kwargs["validate"] is True
-                
+
                 # Test --no-validate option
                 with patch("sys.argv", ["markdown2docx", input_path, "--no-validate"]):
                     with patch("markdown2docx.cli.handle_conversion") as mock_handle:
                         mock_handle.return_value = 0
-                        
+
                         main()
-                        
+
                         call_kwargs = mock_handle.call_args[1]
                         assert call_kwargs["validate"] is False
-                        
-                # Test both options (--validate should take precedence due to if/elif logic)
-                with patch("sys.argv", ["markdown2docx", input_path, "--validate", "--no-validate"]):
+
+                # Test both options (last option wins)
+                with patch(
+                    "sys.argv",
+                    ["markdown2docx", input_path, "--validate", "--no-validate"],
+                ):
                     with patch("markdown2docx.cli.handle_conversion") as mock_handle:
                         mock_handle.return_value = 0
-                        
+
                         main()
-                        
+
                         call_kwargs = mock_handle.call_args[1]
-                        assert call_kwargs["validate"] is True
+                        assert call_kwargs["validate"] is False
             finally:
                 Path(input_path).unlink()
 
@@ -559,15 +625,17 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
-            
+
             try:
                 with patch("sys.argv", ["markdown2docx", input_path, "--quiet"]):
                     with patch("markdown2docx.cli.logging") as mock_logging:
-                        with patch("markdown2docx.cli.handle_conversion") as mock_handle:
+                        with patch(
+                            "markdown2docx.cli.handle_conversion"
+                        ) as mock_handle:
                             mock_handle.return_value = 0
-                            
+
                             main()
-                            
+
                             # Verify logging level was set to ERROR for quiet mode
                             mock_logging.basicConfig.assert_called()
                             call_kwargs = mock_logging.basicConfig.call_args[1]
@@ -580,40 +648,51 @@ class TestMainFunction:
 # Integration Tests
 # ============================================================================
 
+
 class TestCLIIntegration:
     """Test CLI integration scenarios."""
 
     def test_cli_end_to_end_conversion(self):
         """Test complete CLI conversion workflow."""
-        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as md_tmp:
-            md_tmp.write("# Test Document\n\n## Section 1\nContent here.\n\n## Section 2\nMore content.")
+        with tempfile.NamedTemporaryFile(
+            suffix=".md", mode="w", delete=False
+        ) as md_tmp:
+            md_tmp.write(
+                "# Test Document\n\n## Section 1\nContent here.\n\n## Section 2\nMore content."
+            )
             md_tmp.flush()
             input_path = md_tmp.name
-            
-            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as output_tmp:
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".docx", delete=False
+            ) as output_tmp:
                 output_path = output_tmp.name
-                
+
                 try:
                     argv = [
                         "markdown2docx",
                         input_path,
-                        "--output", output_path,
+                        "--output",
+                        output_path,
                         "--toc",
-                        "--toc-depth", "2",
-                        "--verbose"
+                        "--toc-depth",
+                        "2",
+                        "--verbose",
                     ]
-                    
+
                     with patch("sys.argv", argv):
-                        with patch("markdown2docx.cli.MarkdownToDocxConverter") as mock_converter_class:
+                        with patch(
+                            "markdown2docx.cli.MarkdownToDocxConverter"
+                        ) as mock_converter_class:
                             mock_converter = Mock()
                             mock_converter.convert.return_value = Path(output_path)
                             mock_converter_class.return_value = mock_converter
-                            
+
                             result = main()
-                            
+
                             # Should not raise SystemExit
                             mock_converter.convert.assert_called_once()
-                            
+
                             # Verify correct arguments were passed
                             call_args = mock_converter.convert.call_args
                             assert str(call_args[0][0]) == input_path  # input_path
@@ -628,18 +707,27 @@ class TestCLIIntegration:
         """Test complete CLI template creation workflow."""
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             template_path = tmp.name
-            
+
             try:
-                argv = ["markdown2docx", "--create-template", template_path, "--verbose"]
-                
+                argv = [
+                    "markdown2docx",
+                    "--create-template",
+                    template_path,
+                    "--verbose",
+                ]
+
                 with patch("sys.argv", argv):
-                    with patch("markdown2docx.cli.DocxTemplateManager.create_modern_template") as mock_create:
+                    with patch(
+                        "markdown2docx.cli.DocxTemplateManager.create_modern_template"
+                    ) as mock_create:
                         mock_create.return_value = Path(template_path)
-                        
+
                         result = main()
-                        
+
                         # main() doesn't return a value, it exits with sys.exit()
                         # If we reach here, it means no exception was raised
-                        mock_create.assert_called_once_with(template_path, add_sample=True)
+                        mock_create.assert_called_once_with(
+                            template_path, add_sample=True
+                        )
             finally:
                 Path(template_path).unlink(missing_ok=True)

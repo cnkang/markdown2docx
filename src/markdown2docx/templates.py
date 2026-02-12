@@ -82,13 +82,21 @@ class DocxTemplateManager:
         base_config = config or DEFAULT_CONFIG.template
 
         # Override with any explicitly provided parameters
-        self.page_size: PageSize = page_size or base_config.page_size  # type: ignore
-        self.margin_cm = margin_cm or base_config.margin_cm
-        self.body_font = body_font or base_config.body_font
-        self.body_size_pt = body_size_pt or base_config.body_size_pt
-        self.heading_font = heading_font or base_config.heading_font
-        self.code_font = code_font or base_config.code_font
-        self.code_size_pt = code_size_pt or base_config.code_size_pt
+        self.page_size: str = (
+            page_size if page_size is not None else base_config.page_size
+        )
+        self.margin_cm = margin_cm if margin_cm is not None else base_config.margin_cm
+        self.body_font = body_font if body_font is not None else base_config.body_font
+        self.body_size_pt = (
+            body_size_pt if body_size_pt is not None else base_config.body_size_pt
+        )
+        self.heading_font = (
+            heading_font if heading_font is not None else base_config.heading_font
+        )
+        self.code_font = code_font if code_font is not None else base_config.code_font
+        self.code_size_pt = (
+            code_size_pt if code_size_pt is not None else base_config.code_size_pt
+        )
 
         # Validate page size
         if self.page_size not in ("A4", "Letter"):
@@ -180,7 +188,7 @@ class DocxTemplateManager:
             # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            logger.info(f"Creating DOCX template: {output_path}")
+            logger.info("Creating DOCX template: %s", output_path)
 
             # Create new document
             doc = Document()
@@ -199,7 +207,7 @@ class DocxTemplateManager:
             # Save the document
             doc.save(str(output_path))
 
-            logger.info(f"Successfully created template: {output_path}")
+            logger.info("Successfully created template: %s", output_path)
             return output_path
 
         except Exception as e:
@@ -269,7 +277,7 @@ class DocxTemplateManager:
         else:
             code_style = styles.add_style(code_name, WD_STYLE_TYPE.PARAGRAPH)
         code_style.font.name = self.code_font
-        code_style.font.size = Pt(9)
+        code_style.font.size = Pt(self.code_size_pt)
         cp = code_style.paragraph_format
         cp.left_indent = Cm(0.75)
         cp.space_before = Pt(6)
