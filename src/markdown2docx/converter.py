@@ -8,7 +8,7 @@ type safety, and configuration management.
 from __future__ import annotations
 
 import logging
-import subprocess
+import zipfile
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
@@ -19,9 +19,7 @@ try:
 
     VERSION_AVAILABLE = True
 except ImportError:
-    from typing import Any
-
-    Version = Any  # type: ignore
+    Version = None  # type: ignore[assignment,misc]
     VERSION_AVAILABLE = False
 
 from .config import DEFAULT_CONFIG, MarkdownToDocxConfig
@@ -101,7 +99,7 @@ class MarkdownToDocxConverter:
         """
         try:
             version_str = str(pypandoc.get_pandoc_version())
-            logger.info(f"Pandoc version {version_str} detected")
+            logger.info("Pandoc version %s detected", version_str)
 
             if VERSION_AVAILABLE and Version is not None:
                 current_version = Version(version_str)
@@ -109,8 +107,9 @@ class MarkdownToDocxConverter:
 
                 if current_version < min_version:
                     logger.warning(
-                        f"Pandoc {version_str} detected; recommend >= {self.config.pandoc.min_version} "
-                        "for optimal DOCX output"
+                        "Pandoc %s detected; recommend >= %s for optimal DOCX output",
+                        version_str,
+                        self.config.pandoc.min_version,
                     )
             else:
                 logger.info(
@@ -204,8 +203,8 @@ class MarkdownToDocxConverter:
             toc=toc, toc_depth=toc_depth, extra_args=extra_args
         )
 
-        logger.info(f"Converting {input_path} to {output_path}")
-        logger.debug(f"Pandoc arguments: {args}")
+        logger.info("Converting %s to %s", input_path, output_path)
+        logger.debug("Pandoc arguments: %s", args)
 
         # Perform conversion
         try:
@@ -226,7 +225,7 @@ class MarkdownToDocxConverter:
         if validate_output:
             self._validate_docx_output(output_path)
 
-        logger.info(f"Successfully converted to {output_path}")
+        logger.info("Successfully converted to %s", output_path)
         return output_path
 
     def _build_pandoc_args(
@@ -249,17 +248,17 @@ class MarkdownToDocxConverter:
         if self.reference_doc:
             if self.reference_doc.exists():
                 args.extend(["--reference-doc", str(self.reference_doc)])
-                logger.debug(f"Using reference document: {self.reference_doc}")
+                logger.debug("Using reference document: %s", self.reference_doc)
             else:
                 logger.warning(
-                    f"Reference document not found: {self.reference_doc}. "
-                    "Proceeding without template."
+                    "Reference document not found: %s. Proceeding without template.",
+                    self.reference_doc,
                 )
 
         # Add any extra arguments provided by caller
         if extra_args:
             args.extend(extra_args)
-            logger.debug(f"Added extra arguments: {extra_args}")
+            logger.debug("Added extra arguments: %s", extra_args)
 
         return args
 
@@ -328,9 +327,6 @@ class MarkdownToDocxConverter:
             elif output_path.stat().st_size == 0:
                 validation_errors.append("Output file is empty")
 
-            # Try to open as ZIP (DOCX is a ZIP archive)
-            import zipfile
-
             try:
                 with zipfile.ZipFile(output_path, "r") as docx_zip:
                     # Check for required DOCX structure
@@ -372,7 +368,7 @@ class MarkdownToDocxConverter:
         if validation_errors:
             raise ValidationError(str(output_path), validation_errors)
 
-        logger.debug(f"DOCX validation passed for {output_path}")
+        logger.debug("DOCX validation passed for %s", output_path)
 
     def get_pandoc_version(self) -> str:
         """Get the version of Pandoc being used.
