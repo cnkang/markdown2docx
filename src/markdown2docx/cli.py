@@ -8,7 +8,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from .config import MarkdownToDocxConfig, load_config
 from .converter import MarkdownToDocxConverter
@@ -67,7 +67,10 @@ Configuration:
 
     # Table of contents arguments
     parser.add_argument(
-        "--toc", action="store_true", help="Include table of contents in output"
+        "--toc",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include table of contents in output (use --no-toc to disable)",
     )
     parser.add_argument(
         "--toc-depth",
@@ -79,13 +82,9 @@ Configuration:
     # Validation and quality
     parser.add_argument(
         "--validate",
-        action="store_true",
-        help="Validate output DOCX file after conversion",
-    )
-    parser.add_argument(
-        "--no-validate",
-        action="store_true",
-        help="Skip output validation (overrides config default)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Validate output DOCX file after conversion (use --no-validate to skip)",
     )
 
     # Logging and verbosity
@@ -144,20 +143,20 @@ def handle_template_creation(template_path: str, verbose: bool = False) -> int:
         if not verbose:
             print(f"✅ Created modern DOCX template: {output_path}")
         else:
-            print(f"✅ Successfully created modern DOCX template")
+            print("✅ Successfully created modern DOCX template")
             print(f"   📁 Location: {output_path}")
-            print(f"   📄 Template includes sample content for preview")
-            print(f"   🎨 Configured with modern Office 2019+ compatibility")
+            print("   📄 Template includes sample content for preview")
+            print("   🎨 Configured with modern Office 2019+ compatibility")
 
         return 0
 
     except MarkdownToDocxError as e:
-        logger.error(f"Template creation failed: {e}")
+        logger.error("Template creation failed: %s", e)
         if verbose and e.details:
-            logger.error(f"Details: {e.details}")
+            logger.error("Details: %s", e.details)
         return 1
     except Exception as e:
-        logger.error(f"Unexpected error during template creation: {e}")
+        logger.error("Unexpected error during template creation: %s", e)
         return 1
 
 
@@ -165,7 +164,7 @@ def handle_conversion(
     input_path: str,
     output_path: Optional[str],
     template_path: Optional[str],
-    toc: bool,
+    toc: Optional[bool],
     toc_depth: Optional[int],
     validate: Optional[bool],
     config: MarkdownToDocxConfig,
@@ -190,34 +189,26 @@ def handle_conversion(
         # Initialize converter
         converter = MarkdownToDocxConverter(reference_doc=template_path, config=config)
 
-        # Prepare conversion options
-        conversion_options: Dict[str, Any] = {}
-        if toc:
-            conversion_options["toc"] = True
-        if toc_depth is not None:
-            conversion_options["toc_depth"] = toc_depth
-        if validate is not None:
-            conversion_options["validate_output"] = validate
-
         # Perform conversion
         result_path = converter.convert(
             input_path,
             output_path,
-            toc=bool(conversion_options.get("toc", False)),
-            toc_depth=conversion_options.get("toc_depth"),
-            validate_output=conversion_options.get("validate_output"),
+            toc=toc,
+            toc_depth=toc_depth,
+            validate_output=validate,
         )
 
         # Success output
         if not verbose:
             print(f"✅ Successfully converted {input_path} to {result_path}")
         else:
-            print(f"✅ Conversion completed successfully")
+            print("✅ Conversion completed successfully")
             print(f"   📄 Input: {input_path}")
             print(f"   📁 Output: {result_path}")
             if template_path:
                 print(f"   🎨 Template: {template_path}")
-            if toc:
+            effective_toc = toc if toc is not None else config.conversion.default_toc
+            if effective_toc:
                 depth = toc_depth or config.conversion.default_toc_depth
                 print(f"   📑 Table of contents: {depth} levels")
 
@@ -225,18 +216,18 @@ def handle_conversion(
             try:
                 pandoc_version = converter.get_pandoc_version()
                 print(f"   🔧 Pandoc version: {pandoc_version}")
-            except Exception:
-                pass
+            except MarkdownToDocxError:
+                logger.debug("Pandoc version unavailable for verbose output")
 
         return 0
 
     except MarkdownToDocxError as e:
-        logger.error(f"Conversion failed: {e}")
+        logger.error("Conversion failed: %s", e)
         if verbose and e.details:
-            logger.error(f"Details: {e.details}")
+            logger.error("Details: %s", e.details)
         return 1
     except Exception as e:
-        logger.error(f"Unexpected error during conversion: {e}")
+        logger.error("Unexpected error during conversion: %s", e)
         return 1
 
 
@@ -256,7 +247,7 @@ def main() -> None:
     try:
         config = load_config(args.config if hasattr(args, "config") else None)
     except Exception as e:
-        logger.error(f"Failed to load configuration: {e}")
+        logger.error("Failed to load configuration: %s", e)
         sys.exit(1)
 
     # Handle template creation
@@ -270,14 +261,6 @@ def main() -> None:
     if not args.input:
         parser.error("Input Markdown file is required (unless using --create-template)")
 
-    # Determine validation setting
-    validate: Optional[bool] = None
-    if args.validate:
-        validate = True
-    elif args.no_validate:
-        validate = False
-    # Otherwise use config default
-
     # Handle conversion
     exit_code = handle_conversion(
         input_path=args.input,
@@ -285,7 +268,7 @@ def main() -> None:
         template_path=args.template,
         toc=args.toc,
         toc_depth=args.toc_depth,
-        validate=validate,
+        validate=args.validate,
         config=config,
         verbose=args.verbose,
     )
