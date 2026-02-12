@@ -24,13 +24,35 @@ class TestEnvironmentVariableParsing:
 
     def test_parse_env_value_boolean_true(self):
         """Test parsing boolean true values."""
-        true_values = ["true", "True", "TRUE", "yes", "Yes", "YES", "1", "on", "On", "ON"]
+        true_values = [
+            "true",
+            "True",
+            "TRUE",
+            "yes",
+            "Yes",
+            "YES",
+            "1",
+            "on",
+            "On",
+            "ON",
+        ]
         for value in true_values:
             assert _parse_env_value(value) is True
 
     def test_parse_env_value_boolean_false(self):
         """Test parsing boolean false values."""
-        false_values = ["false", "False", "FALSE", "no", "No", "NO", "0", "off", "Off", "OFF"]
+        false_values = [
+            "false",
+            "False",
+            "FALSE",
+            "no",
+            "No",
+            "NO",
+            "0",
+            "off",
+            "Off",
+            "OFF",
+        ]
         for value in false_values:
             assert _parse_env_value(value) is False
 
@@ -72,7 +94,7 @@ class TestMarkdownToDocxConfigFromEnv:
             "MD2DOCX_PANDOC__MIN_VERSION": "2.19.0",
             "MD2DOCX_PANDOC__TIMEOUT_SECONDS": "300",
         }
-        
+
         with patch.dict(os.environ, env_vars, clear=True):
             config = MarkdownToDocxConfig.from_env()
             assert config.pandoc.min_version == "2.19.0"
@@ -85,7 +107,7 @@ class TestMarkdownToDocxConfigFromEnv:
             "MD2DOCX_TEMPLATE__BODY_SIZE_PT": "12",
             "MD2DOCX_TEMPLATE__MARGIN_CM": "3.0",
         }
-        
+
         with patch.dict(os.environ, env_vars, clear=True):
             config = MarkdownToDocxConfig.from_env()
             assert config.template.body_font == "Arial"
@@ -98,7 +120,7 @@ class TestMarkdownToDocxConfigFromEnv:
             "MD2DOCX_CONVERSION__DEFAULT_TOC_DEPTH": "4",
             "MD2DOCX_CONVERSION__VALIDATE_OUTPUT": "false",
         }
-        
+
         with patch.dict(os.environ, env_vars, clear=True):
             config = MarkdownToDocxConfig.from_env()
             assert config.conversion.default_toc_depth == 4
@@ -110,7 +132,7 @@ class TestMarkdownToDocxConfigFromEnv:
             "MD2DOCX_LOGGING__LEVEL": "DEBUG",
             "MD2DOCX_LOGGING__FORMAT": "%(levelname)s: %(message)s",
         }
-        
+
         with patch.dict(os.environ, env_vars, clear=True):
             config = MarkdownToDocxConfig.from_env()
             assert config.logging.level == "DEBUG"
@@ -126,7 +148,7 @@ class TestMarkdownToDocxConfigFromEnv:
             "OTHER_VAR": "should_be_ignored",
             "MD2DOCX_INVALID": "top_level_var",
         }
-        
+
         with patch.dict(os.environ, env_vars, clear=True):
             config = MarkdownToDocxConfig.from_env()
             assert config.pandoc.timeout_seconds == 600
@@ -173,21 +195,21 @@ class TestMarkdownToDocxConfigFromDict:
                 "format": "%(message)s",
             },
         }
-        
+
         config = MarkdownToDocxConfig.from_dict(config_dict)
-        
+
         # Pandoc config
         assert config.pandoc.min_version == "2.19.0"
         assert config.pandoc.timeout_seconds == 120
-        
+
         # Template config
         assert config.template.body_font == "Arial"
         assert config.template.body_size_pt == 12
-        
+
         # Conversion config
         assert config.conversion.default_toc_depth == 5
         assert config.conversion.validate_output is True
-        
+
         # Logging config
         assert config.logging.level == "ERROR"
         assert config.logging.format == "%(message)s"
@@ -198,10 +220,10 @@ class TestMarkdownToDocxConfigFromDict:
         invalid_dict = {
             "pandoc": "not_a_dict",  # Should be a dict
         }
-        
+
         with pytest.raises(ConfigurationError) as exc_info:
             MarkdownToDocxConfig.from_dict(invalid_dict)
-        
+
         assert "Invalid configuration format" in str(exc_info.value)
 
 
@@ -212,7 +234,7 @@ class TestGetPandocArgs:
         """Test basic Pandoc arguments generation."""
         config = MarkdownToDocxConfig()
         args = config.get_pandoc_args()
-        
+
         assert isinstance(args, list)
         assert all(isinstance(arg, str) for arg in args)
 
@@ -220,14 +242,14 @@ class TestGetPandocArgs:
         """Test Pandoc arguments with table of contents."""
         config = MarkdownToDocxConfig()
         args = config.get_pandoc_args(toc=True)
-        
+
         assert "--toc" in args
 
     def test_get_pandoc_args_with_toc_depth(self):
         """Test Pandoc arguments with custom TOC depth."""
         config = MarkdownToDocxConfig()
         args = config.get_pandoc_args(toc=True, toc_depth=5)
-        
+
         assert "--toc" in args
         # TOC depth is passed as separate arguments
         toc_depth_idx = args.index("--toc-depth")
@@ -237,7 +259,7 @@ class TestGetPandocArgs:
         """Test that TOC depth is ignored when TOC is disabled."""
         config = MarkdownToDocxConfig()
         args = config.get_pandoc_args(toc=False, toc_depth=5)
-        
+
         assert "--toc" not in args
         assert "--toc-depth=5" not in args
 
@@ -247,7 +269,9 @@ class TestLoadConfig:
 
     def test_load_config_no_file(self):
         """Test loading config without file (from environment)."""
-        with patch.dict(os.environ, {"MD2DOCX_PANDOC__TIMEOUT_SECONDS": "180"}, clear=True):
+        with patch.dict(
+            os.environ, {"MD2DOCX_PANDOC__TIMEOUT_SECONDS": "180"}, clear=True
+        ):
             config = load_config()
             assert config.pandoc.timeout_seconds == 180
 
@@ -258,17 +282,72 @@ class TestLoadConfig:
         assert isinstance(config, MarkdownToDocxConfig)
 
     def test_load_config_existing_file(self):
-        """Test loading config with existing file (currently falls back to env)."""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
-            tmp.write(b"# Placeholder config file\n")
+        """Test loading config from TOML file and env override precedence."""
+        config_toml = b"""
+[pandoc]
+min_version = "2.22"
+timeout_seconds = 120
+
+[conversion]
+default_toc = true
+default_toc_depth = 5
+"""
+        with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as tmp:
+            tmp.write(config_toml)
             tmp.flush()
-            
             config_path = Path(tmp.name)
-            
+
             try:
-                with patch.dict(os.environ, {"MD2DOCX_LOGGING__LEVEL": "DEBUG"}, clear=True):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "MD2DOCX_LOGGING__LEVEL": "DEBUG",
+                        "MD2DOCX_PANDOC__TIMEOUT_SECONDS": "180",
+                    },
+                    clear=True,
+                ):
                     config = load_config(config_path)
+                    assert config.pandoc.min_version == "2.22"
+                    assert config.pandoc.timeout_seconds == 180
+                    assert config.conversion.default_toc is True
+                    assert config.conversion.default_toc_depth == 5
                     assert config.logging.level == "DEBUG"
+            finally:
+                config_path.unlink()
+
+    def test_load_config_existing_yaml_file(self):
+        """Test loading config from YAML file."""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False) as tmp:
+            tmp.write(
+                b"""
+pandoc:
+  min_version: "2.21"
+template:
+  body_font: "Arial"
+"""
+            )
+            tmp.flush()
+            config_path = Path(tmp.name)
+
+            try:
+                with patch.dict(os.environ, {}, clear=True):
+                    config = load_config(config_path)
+                    assert config.pandoc.min_version == "2.21"
+                    assert config.template.body_font == "Arial"
+            finally:
+                config_path.unlink()
+
+    def test_load_config_unsupported_extension(self):
+        """Test unsupported config file extension."""
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            tmp.write(b'{"pandoc": {"min_version": "2.20"}}')
+            tmp.flush()
+            config_path = Path(tmp.name)
+
+            try:
+                with pytest.raises(ConfigurationError) as exc_info:
+                    load_config(config_path)
+                assert "Unsupported config format" in str(exc_info.value)
             finally:
                 config_path.unlink()
 
@@ -289,21 +368,21 @@ class TestConfigurationIntegration:
             "MD2DOCX_LOGGING__LEVEL": "INFO",
             "MD2DOCX_LOGGING__FORMAT": "[%(asctime)s] %(levelname)s: %(message)s",
         }
-        
+
         with patch.dict(os.environ, env_vars, clear=True):
             config = MarkdownToDocxConfig.from_env()
-            
+
             # Verify all settings are applied correctly
             assert config.pandoc.min_version == "2.19.2"
             assert config.pandoc.timeout_seconds == 900
-            
+
             assert config.template.body_font == "Times New Roman"
             assert config.template.body_size_pt == 12
             assert config.template.margin_cm == 2.0
-            
+
             assert config.conversion.default_toc_depth == 6
             assert config.conversion.validate_output is True
-            
+
             assert config.logging.level == "INFO"
             assert config.logging.format == "[%(asctime)s] %(levelname)s: %(message)s"
 
@@ -313,14 +392,14 @@ class TestConfigurationIntegration:
             "MD2DOCX_PANDOC__TIMEOUT_SECONDS": "1200",  # Override default
             "MD2DOCX_CONVERSION__DEFAULT_TOC_DEPTH": "1",  # Override default
         }
-        
+
         with patch.dict(os.environ, env_vars, clear=True):
             config = MarkdownToDocxConfig.from_env()
-            
+
             # These should be overridden
             assert config.pandoc.timeout_seconds == 1200
             assert config.conversion.default_toc_depth == 1
-            
+
             # These should remain defaults
             assert config.pandoc.min_version == "2.19"  # Default
             assert config.template.body_font == "Calibri"  # Default

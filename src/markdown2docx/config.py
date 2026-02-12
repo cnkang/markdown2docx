@@ -7,6 +7,7 @@ default values, environment variables, and configuration files.
 from __future__ import annotations
 
 import os
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -140,26 +141,7 @@ class MarkdownToDocxConfig:
         Returns:
             MarkdownToDocxConfig instance with values from environment
         """
-        config_dict: Dict[str, Any] = {}
-
-        # Parse environment variables
-        for key, value in os.environ.items():
-            if not key.startswith("MD2DOCX_"):
-                continue
-
-            # Remove prefix and convert to lowercase
-            config_key = key[8:].lower()
-
-            # Handle nested keys (double underscore separator)
-            if "__" in config_key:
-                section, setting = config_key.split("__", 1)
-                if section not in config_dict:
-                    config_dict[section] = {}
-                config_dict[section][setting] = _parse_env_value(value)
-            else:
-                config_dict[config_key] = _parse_env_value(value)
-
-        return cls.from_dict(config_dict)
+        return cls.from_dict(_parse_env_config())
 
     def get_pandoc_args(self, *, toc: bool = False, toc_depth: int = 3) -> list[str]:
         """Get Pandoc arguments based on configuration.
@@ -191,20 +173,96 @@ def _parse_env_value(value: str) -> Any:
     # Handle boolean values
     if value.lower() in ("true", "yes", "1", "on"):
         return True
-    elif value.lower() in ("false", "no", "0", "off"):
+    if value.lower() in ("false", "no", "0", "off"):
         return False
 
     # Handle numeric values
     try:
         if "." in value:
             return float(value)
-        else:
-            return int(value)
+        return int(value)
     except ValueError:
         pass
 
     # Return as string
     return value
+
+
+def _parse_env_config() -> Dict[str, Any]:
+    """Parse MD2DOCX_* environment variables into a nested config dictionary."""
+    config_dict: Dict[str, Any] = {}
+
+    for key, value in os.environ.items():
+        if not key.startswith("MD2DOCX_"):
+            continue
+
+        config_key = key[8:].lower()
+        if "__" in config_key:
+            section, setting = config_key.split("__", 1)
+            section_values = config_dict.setdefault(section, {})
+            if isinstance(section_values, dict):
+                section_values[setting] = _parse_env_value(value)
+        else:
+            config_dict[config_key] = _parse_env_value(value)
+
+    return config_dict
+
+
+def _load_config_file(config_path: Path) -> Dict[str, Any]:
+    """Load config data from TOML or YAML file."""
+    suffix = config_path.suffix.lower()
+    loaded: Any
+    try:
+        content = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigurationError(
+            "config_path", f"Unable to read config file: {exc}"
+        ) from exc
+
+    if suffix == ".toml":
+        try:
+            loaded = tomllib.loads(content)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigurationError(
+                "config_path", f"Invalid TOML configuration: {exc}"
+            ) from exc
+    elif suffix in {".yaml", ".yml"}:
+        try:
+            import yaml  # type: ignore
+        except ImportError as exc:
+            raise ConfigurationError(
+                "config_path",
+                "YAML config requires PyYAML. Install with `uv add pyyaml`.",
+            ) from exc
+        try:
+            loaded = yaml.safe_load(content)
+        except Exception as exc:
+            raise ConfigurationError(
+                "config_path", f"Invalid YAML configuration: {exc}"
+            ) from exc
+    else:
+        raise ConfigurationError(
+            "config_path",
+            "Unsupported config format. Use .toml, .yaml, or .yml files.",
+        )
+
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ConfigurationError("config_path", "Configuration root must be a mapping.")
+    return loaded
+
+
+def _merge_config(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge config dictionaries; values in override take precedence."""
+    merged = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_config(existing, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def load_config(config_path: Optional[Path] = None) -> MarkdownToDocxConfig:
@@ -219,13 +277,13 @@ def load_config(config_path: Optional[Path] = None) -> MarkdownToDocxConfig:
     Raises:
         ConfigurationError: If configuration file is invalid
     """
+    file_config: Dict[str, Any] = {}
     if config_path and config_path.exists():
-        # TODO: Add support for YAML/TOML config files
-        # For now, just use environment variables
-        pass
+        file_config = _load_config_file(config_path)
 
-    # Load from environment variables
-    return MarkdownToDocxConfig.from_env()
+    env_config = _parse_env_config()
+    merged = _merge_config(file_config, env_config)
+    return MarkdownToDocxConfig.from_dict(merged)
 
 
 # Global default configuration instance
