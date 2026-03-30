@@ -7,14 +7,14 @@ authors = [
 ]
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 keywords = ["markdown", "docx", "pandoc", "conversion", "document"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Text Processing :: Markup",
     "Topic :: Office/Business :: Office Suites",
 ]
@@ -97,7 +97,7 @@ exclude_lines = [
 
 [tool.black]
 line-length = 88
-target-version = ['py313']
+target-version = ['py314']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -121,7 +121,7 @@ known_first_party = ["markdown2docx"]
 known_third_party = ["pypandoc", "docx", "lxml", "packaging"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

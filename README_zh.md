@@ -163,7 +163,7 @@ uv run python -m src.markdown2docx.cli examples/example.md -o example_output.doc
 
 ## 系统要求
 
-- Python 3.13+
+- Python 3.14+
 - Pandoc 2.19+（推荐）
 - pypandoc >= 1.13
 - python-docx >= 1.1.2

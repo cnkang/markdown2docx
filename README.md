@@ -165,7 +165,7 @@ uv run python -m src.markdown2docx.cli example.md -o example_output.docx
 
 ## System Requirements
 
-- Python 3.13+
+- Python 3.14+
 - Pandoc 2.19+ (recommended)
 - pypandoc >= 1.13
 - python-docx >= 1.1.2
