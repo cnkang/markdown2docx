@@ -148,6 +148,38 @@ def test_convert_nonexistent_file(converter):
         converter.convert("nonexistent.md")
 
 
+@patch("markdown2docx.converter.MarkdownToDocxConverter._validate_pandoc")
+def test_convert_rejects_non_docx_output(mock_validate_pandoc):
+    """Test converter rejects non-DOCX output extension."""
+    mock_validate_pandoc.return_value = None
+    with TemporaryDirectory() as tmpdir:
+        input_path = Path(tmpdir) / "input.md"
+        input_path.write_text("# test")
+        converter = MarkdownToDocxConverter()
+
+        with pytest.raises(ConversionError, match="must use \\.docx extension"):
+            converter.convert(input_path, Path(tmpdir) / "output.txt")
+
+
+@patch("markdown2docx.converter.MarkdownToDocxConverter._validate_pandoc")
+def test_convert_rejects_symlink_output(mock_validate_pandoc):
+    """Test converter rejects output symlink to avoid unsafe overwrite."""
+    mock_validate_pandoc.return_value = None
+    with TemporaryDirectory() as tmpdir:
+        input_path = Path(tmpdir) / "input.md"
+        target_path = Path(tmpdir) / "target.docx"
+        symlink_path = Path(tmpdir) / "output.docx"
+        input_path.write_text("# test")
+        target_path.write_text("placeholder")
+        symlink_path.symlink_to(target_path)
+        converter = MarkdownToDocxConverter()
+
+        with pytest.raises(
+            ConversionError, match="Refusing to write through symlink output path"
+        ):
+            converter.convert(input_path, symlink_path)
+
+
 def test_template_creation():
     """Test modern template creation (测试现代模板创建)."""
     with TemporaryDirectory() as tmpdir:

@@ -14,6 +14,7 @@ from docx.enum.style import WD_STYLE_TYPE
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from markdown2docx.converter import MarkdownToDocxConverter
+from markdown2docx.exceptions import TemplateError
 from markdown2docx.templates import DocxTemplateManager
 
 
@@ -231,3 +232,22 @@ def test_template_error_handling():
 
         result = DocxTemplateManager.create_modern_template(invalid_path)
         assert result.exists()
+
+
+def test_template_rejects_non_docx_output():
+    """Test template creation rejects non-DOCX extension."""
+    with TemporaryDirectory() as tmpdir:
+        invalid_path = Path(tmpdir) / "template.txt"
+        with pytest.raises(TemplateError, match="must use \\.docx extension"):
+            DocxTemplateManager.create_modern_template(invalid_path)
+
+
+def test_template_rejects_symlink_output():
+    """Test template creation rejects symlink output path."""
+    with TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "target.docx"
+        symlink = Path(tmpdir) / "template.docx"
+        target.write_text("placeholder")
+        symlink.symlink_to(target)
+        with pytest.raises(TemplateError, match="through symlink path"):
+            DocxTemplateManager.create_modern_template(symlink)
