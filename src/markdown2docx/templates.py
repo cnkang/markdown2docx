@@ -184,6 +184,7 @@ class DocxTemplateManager:
         """
         try:
             output_path = Path(output_path)
+            self._validate_output_path(output_path)
 
             # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +215,17 @@ class DocxTemplateManager:
             raise TemplateError(
                 str(output_path), f"Failed to create template file: {e}"
             ) from e
+
+    def _validate_output_path(self, output_path: Path) -> None:
+        """Validate output path safety constraints before writing files."""
+        if output_path.suffix.lower() != ".docx":
+            raise TemplateError(
+                str(output_path), "Output template file must use .docx extension"
+            )
+        if output_path.exists() and output_path.is_symlink():
+            raise TemplateError(
+                str(output_path), "Refusing to write template through symlink path"
+            )
 
     # ---------- Layout & styles ----------
 

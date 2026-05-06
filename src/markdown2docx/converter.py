@@ -173,6 +173,7 @@ class MarkdownToDocxConverter:
         output_path = (
             Path(output_path) if output_path else input_path.with_suffix(".docx")
         )
+        self._validate_output_path(output_path, str(input_path))
 
         # Use configuration defaults if not specified
         if toc is None:
@@ -227,6 +228,20 @@ class MarkdownToDocxConverter:
 
         logger.info("Successfully converted to %s", output_path)
         return output_path
+
+    def _validate_output_path(self, output_path: Path, input_file: str) -> None:
+        """Validate output path safety constraints before writing files."""
+        if output_path.suffix.lower() != ".docx":
+            raise ConversionError(
+                input_file,
+                f"Output file must use .docx extension: {output_path}",
+            )
+
+        if output_path.exists() and output_path.is_symlink():
+            raise ConversionError(
+                input_file,
+                f"Refusing to write through symlink output path: {output_path}",
+            )
 
     def _build_pandoc_args(
         self, *, toc: bool, toc_depth: int, extra_args: Optional[Sequence[str]]
