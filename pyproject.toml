@@ -42,7 +42,7 @@ dev = [
     "isort>=5.13.0",
     "mypy>=2.3.0",
     "pylint>=4.0.6",
-    "pre-commit>=4.6.1",
+    "pre-commit>=4.6.2",
 ]
 docs = [
     "sphinx>=7.0.0",
