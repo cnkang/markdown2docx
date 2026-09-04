@@ -507,7 +507,7 @@ dev = [
     { name = "isort", specifier = ">=9.0.1" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pre-commit", specifier = ">=4.6.2" },
-    { name = "pylint", specifier = ">=4.0.7" },
+    { name = "pylint", specifier = ">=4.0.8" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=6.2.1" },
 ]
