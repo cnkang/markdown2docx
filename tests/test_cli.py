@@ -320,6 +320,7 @@ class TestHandleConversion:
             tmp.write("# Test Document\nContent here.")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             config = MarkdownToDocxConfig()
 
@@ -355,6 +356,7 @@ class TestHandleConversion:
             tmp.write("# Test Document\nContent here.")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             config = MarkdownToDocxConfig()
 
@@ -389,6 +391,7 @@ class TestHandleConversion:
             tmp.write("# Test Document\n## Section 1\nContent here.")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             config = MarkdownToDocxConfig()
 
@@ -454,6 +457,7 @@ class TestHandleConversion:
             tmp.write("# Test Document\nContent here.")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             config = MarkdownToDocxConfig()
 
@@ -537,6 +541,7 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 with patch("sys.argv", ["markdown2docx", input_path]):
@@ -554,6 +559,7 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 with patch("sys.argv", ["markdown2docx", input_path, "--verbose"]):
@@ -582,6 +588,7 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 # Test --validate option
@@ -625,6 +632,7 @@ class TestMainFunction:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 with patch("sys.argv", ["markdown2docx", input_path, "--quiet"]):
@@ -662,11 +670,13 @@ class TestCLIIntegration:
             )
             md_tmp.flush()
             input_path = md_tmp.name
+            md_tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             with tempfile.NamedTemporaryFile(
                 suffix=".docx", delete=False
             ) as output_tmp:
                 output_path = output_tmp.name
+                output_tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
                 try:
                     argv = [
@@ -707,6 +717,7 @@ class TestCLIIntegration:
         """Test complete CLI template creation workflow."""
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             template_path = tmp.name
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 argv = [

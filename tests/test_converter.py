@@ -237,6 +237,7 @@ class TestConverterInitialization:
         """Test converter initialization with reference document."""
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             ref_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             try:
                 converter = MarkdownToDocxConverter(reference_doc=ref_path)
                 assert converter.reference_doc == ref_path
@@ -248,6 +249,7 @@ class TestConverterInitialization:
         config = MarkdownToDocxConfig()
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             ref_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             try:
                 converter = MarkdownToDocxConverter(reference_doc=ref_path, config=config)
                 assert converter.config is config
@@ -348,6 +350,7 @@ class TestPandocArgsGeneration:
         """Test Pandoc arguments with reference document."""
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             ref_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             try:
                 converter = MarkdownToDocxConverter(reference_doc=ref_path)
                 args = converter._build_pandoc_args(toc=False, toc_depth=3, extra_args=None)
@@ -385,6 +388,7 @@ class TestDocxValidation:
         
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             output_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             
             try:
                 # Create a minimal valid DOCX document
@@ -411,8 +415,9 @@ class TestDocxValidation:
 
     def test_validate_docx_empty_file(self):
         """Test DOCX validation with empty file."""
-        with tempfile.NamedTemporaryFile(suffix=".docx") as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             output_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             # File is empty by default
             
             converter = MarkdownToDocxConverter()
@@ -420,6 +425,7 @@ class TestDocxValidation:
                 converter._validate_docx_output(output_path)
             
             assert "Output file is empty" in str(exc_info.value)
+            output_path.unlink()
 
 
 # ============================================================================
@@ -438,6 +444,7 @@ class TestConversionErrors:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             
             try:
                 converter = MarkdownToDocxConverter()
@@ -467,6 +474,7 @@ class TestConversionErrors:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             
             try:
                 converter = MarkdownToDocxConverter()
@@ -498,6 +506,7 @@ class TestConvertWithTemplate:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             
             nonexistent_template = Path("/nonexistent/template.docx")
             

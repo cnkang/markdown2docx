@@ -296,6 +296,7 @@ default_toc_depth = 5
             tmp.write(config_toml)
             tmp.flush()
             config_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 with patch.dict(
@@ -328,6 +329,7 @@ template:
             )
             tmp.flush()
             config_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 with patch.dict(os.environ, {}, clear=True):
@@ -343,6 +345,7 @@ template:
             tmp.write(b'{"pandoc": {"min_version": "2.20"}}')
             tmp.flush()
             config_path = Path(tmp.name)
+            tmp.close()  # Release the handle before Windows reads/deletes this fixture.
 
             try:
                 with pytest.raises(ConfigurationError) as exc_info:
