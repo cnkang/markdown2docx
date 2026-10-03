@@ -260,7 +260,7 @@ class TestHandleTemplateCreation:
         result = handle_template_creation("new_template.docx", verbose=False)
 
         assert result == 0
-        mock_create.assert_called_once_with("new_template.docx", add_sample=True)
+        mock_create.assert_called_once_with("new_template.docx", config=None, add_sample=True)
 
     @patch("markdown2docx.cli.DocxTemplateManager.create_modern_template")
     def test_handle_template_creation_verbose(self, mock_create):
@@ -533,7 +533,9 @@ class TestMainFunction:
                 mock_handle.return_value = 0
 
                 main()  # Should not raise SystemExit
-                mock_handle.assert_called_once_with("template.docx", False)
+                mock_handle.assert_called_once_with(
+                    "template.docx", False, config=MarkdownToDocxConfig().template
+                )
 
     def test_main_conversion(self):
         """Test main function with conversion."""
@@ -738,7 +740,91 @@ class TestCLIIntegration:
                         # main() doesn't return a value, it exits with sys.exit()
                         # If we reach here, it means no exception was raised
                         mock_create.assert_called_once_with(
-                            template_path, add_sample=True
+                            template_path, config=MarkdownToDocxConfig().template, add_sample=True
                         )
             finally:
                 Path(template_path).unlink(missing_ok=True)
+
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"], ["--ui-lang", "zh"]])
+def test_create_template_applies_loaded_config(tmp_path, monkeypatch, mode):
+    from docx import Document
+    from docx.shared import Cm, Inches, Pt
+
+    config = tmp_path / "template.toml"
+    config.write_text(
+        '[template]\npage_size = "Letter"\nmargin_cm = 3.25\n'
+        'body_font = "Noto Sans Arabic"\nheading_font = "Noto Sans CJK TC"\n'
+        "body_size_pt = 13\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "configured.docx"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "markdown2docx",
+            "--create-template",
+            str(output),
+            "--config",
+            str(config),
+            *mode,
+        ],
+    )
+    main()
+    document = Document(output)
+    assert abs(document.sections[0].page_width - Inches(8.5)) < 1000
+    assert abs(document.sections[0].left_margin - Cm(3.25)) < 1000
+    assert document.styles["Normal"].font.name == "Noto Sans Arabic"
+    assert document.styles["Normal"].font.size == Pt(13)
+    assert document.styles["Heading 1"].font.name == "Noto Sans CJK TC"
+
+
+@pytest.mark.parametrize("locale", ["en", "zh"])
+@pytest.mark.parametrize("status", ["rendered", "unverified", "failed"])
+def test_render_cli_reports_status_and_reason(monkeypatch, capsys, locale, status):
+    from types import SimpleNamespace
+    from markdown2docx.messages import message
+
+    report = SimpleNamespace(
+        output_path="output.docx",
+        preview={"status": status, "reason": "renderer evidence"},
+        warnings=[{"code": "EXAMPLE", "message": "retained warning"}],
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["markdown2docx", "input.md", "--render", "--ui-lang", locale]
+    )
+    with patch("markdown2docx.cli.MarkdownToDocxConverter") as converter:
+        converter.return_value.convert_with_report.return_value = report
+        main()
+    captured = capsys.readouterr()
+    assert message(locale, "success", path="output.docx") in captured.out
+    assert (
+        message(locale, "preview", status=status, reason="renderer evidence")
+        in captured.out
+    )
+    assert "retained warning" in captured.err
+
+
+@pytest.mark.parametrize("mode", ["--quiet", "--json"])
+def test_render_cli_preserves_quiet_and_json_modes(monkeypatch, capsys, mode):
+    from types import SimpleNamespace
+
+    report = SimpleNamespace(
+        output_path="output.docx",
+        preview={"status": "unverified", "reason": "fonts cached"},
+        warnings=[],
+        to_dict=lambda: {"preview": {"status": "unverified", "reason": "fonts cached"}},
+    )
+    monkeypatch.setattr(sys, "argv", ["markdown2docx", "input.md", "--render", mode])
+    with patch("markdown2docx.cli.MarkdownToDocxConverter") as converter:
+        converter.return_value.convert_with_report.return_value = report
+        main()
+    captured = capsys.readouterr()
+    if mode == "--quiet":
+        assert captured.out == ""
+    else:
+        import json
+
+        assert json.loads(captured.out) == report.to_dict()

@@ -9,6 +9,8 @@
 - Preserve secure POSIX publication from main; add a Windows directory-handle implementation. Preserve caller-requested paths in validation errors.
 - Add a distributable Agent skill with an immutable execution-package revision, a comprehensive Markdown fixture and three-platform CI artifacts.
 
+- Apply template configuration in every CLI mode, show optional preview status/reasons, preserve hyperlink character styles, warn for emoji sequences across code/generated runs, and clear stale raster pages.
+
 ### Migration
 
 `convert()` still returns `Path`. `--no-validate` and `validate_output=False` cannot disable mandatory structure/text/font/direction checks. A missing or corrupt requested template now fails. Custom template/config fonts without an approved record require the explicit `allow_unverified_fonts` exception and must be installed. Template layout/styles remain, but script-aware run fonts are managed by the converter. Reserved input/output/template Pandoc switches should use the corresponding converter arguments instead of `extra_args`.

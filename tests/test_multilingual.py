@@ -253,3 +253,61 @@ def test_windows_atomic_output(tmp_path):
     with pytest.raises(FileExistsError):
         with staged_docx_output(output, overwrite=False):
             pass
+
+
+@pytest.mark.parametrize("emoji", ["🇨🇳", "👍🏽", "1️⃣", "👩‍💻", "❤️"])
+@pytest.mark.parametrize("formatting", ["{}", "`{}`", "```text\n{}\n```"])
+def test_emoji_sequences_warn_without_losing_text(tmp_path, emoji, formatting):
+    source = tmp_path / "emoji.md"
+    source.write_text(formatting.format(emoji), encoding="utf-8")
+    report = MarkdownToDocxConverter().convert_with_report(source)
+    assert report.checks["font_coverage"] == "unverified"
+    assert report.checks["text_integrity"] == "passed"
+    assert any(item["code"] == "EMOJI_UNVERIFIED" for item in report.warnings)
+    root = parts(report.output_path)["word/document.xml"]
+    assert emoji in "".join(root.xpath("//w:t/text()", namespaces=NS))
+
+
+@pytest.mark.parametrize("line_break", ["", "<w:br/>"])
+def test_writer_generated_emoji_runs_are_unverified(tmp_path, line_break):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = tmp_path / "generated.docx"
+    # Cover both simple unmarked text and runs that also contain a break.
+    xml = f'<w:document xmlns:w="{NS["w"]}"><w:body><w:p><w:r><w:t>🇺🇳 👍🏽 1️⃣</w:t>{line_break}</w:r></w:p></w:body></w:document>'
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", xml)
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    checks = document.apply(path)
+    assert checks["font_coverage"] == "unverified"
+    assert any(item["code"] == "EMOJI_UNVERIFIED" for item in document.warnings)
+    assert "🇺🇳 👍🏽 1️⃣" == "".join(
+        parts(path)["word/document.xml"].xpath("//w:t/text()", namespaces=NS)
+    )
+
+
+def test_multilingual_hyperlink_keeps_character_style(tmp_path):
+    source = tmp_path / "link.md"
+    source.write_text(
+        "[**English 中文 العربية**](https://example.com) outside", encoding="utf-8"
+    )
+    root = parts(MarkdownToDocxConverter().convert(source))["word/document.xml"]
+    linked = root.xpath("//w:hyperlink//w:r[w:t]", namespaces=NS)
+    assert len(linked) >= 3
+    assert all(
+        run.find(W + "rPr/" + W + "rStyle").get(W + "val") == "Hyperlink"
+        for run in linked
+    )
+    assert all(run.find(W + "rPr/" + W + "b") is not None for run in linked)
+    assert not root.xpath("//w:rStyle[starts-with(@w:val, 'MD2D')]", namespaces=NS)
+    assert not root.xpath("//w:p/w:r/w:rPr/w:rStyle", namespaces=NS)
+
+
+def test_text_symbols_and_plain_digits_are_not_emoji(tmp_path):
+    source = tmp_path / "symbols.md"
+    source.write_text("▪ © 123", encoding="utf-8")
+    report = MarkdownToDocxConverter().convert_with_report(source)
+    assert report.checks["font_coverage"] == "passed"
+    assert not any(item["code"] == "EMOJI_UNVERIFIED" for item in report.warnings)
