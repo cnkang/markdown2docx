@@ -21,7 +21,7 @@ def _open_parent(path: Path) -> int:
     ):
         raise OSError("Secure DOCX publication is not supported on this platform")
 
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY") | getattr(os, "O_NOFOLLOW")
     absolute = path.absolute()
     descriptor = os.open(absolute.anchor, flags)
     root = os.fstat(descriptor)
@@ -90,15 +90,20 @@ def _publish(source: Path, destination: Path, parent: int, overwrite: bool) -> N
     staging_name = f".markdown2docx-{uuid.uuid4().hex}"
     os.mkdir(staging_name, mode=0o700, dir_fd=parent)
     staging = os.open(
-        staging_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent
+        staging_name,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY") | getattr(os, "O_NOFOLLOW"),
+        dir_fd=parent,
     )
     try:
         info = os.fstat(staging)
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        if (
+            info.st_uid != getattr(os, "geteuid")()
+            or stat.S_IMODE(info.st_mode) & 0o077
+        ):
             raise OSError("Output staging directory is not private")
         file_descriptor = os.open(
             "document.docx",
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW"),
             0o600,
             dir_fd=staging,
         )
@@ -130,7 +135,7 @@ def _publish(source: Path, destination: Path, parent: int, overwrite: bool) -> N
 def _writer_temporary_root() -> Path:
     """Use a stable OS namespace rather than an arbitrary TMPDIR pathname."""
     root = Path("/private/tmp" if sys.platform == "darwin" else "/tmp")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY") | getattr(os, "O_NOFOLLOW")
     descriptor = os.open(root.anchor, flags)
     try:
         for component in root.parts[1:]:

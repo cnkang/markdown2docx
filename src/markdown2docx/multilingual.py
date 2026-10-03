@@ -480,6 +480,34 @@ class MultilingualDocument:
                                 copied = copy.deepcopy(original)
                                 copied.tag = W + target
                                 props.append(copied)
+                if info.filename == "word/numbering.xml":
+                    # Legacy reference bullets use private-use Symbol/Wingdings
+                    # glyphs. Replace both glyph and font, not just the family.
+                    for level in root.iter(W + "lvl"):
+                        fmt = level.find(W + "numFmt")
+                        label = level.find(W + "lvlText")
+                        if (
+                            fmt is None
+                            or label is None
+                            or fmt.get(W + "val") != "bullet"
+                        ):
+                            continue
+                        value = label.get(W + "val", "")
+                        value = {"\uf0b7": "•", "\uf0a7": "▪", "o": "○"}.get(
+                            value, value
+                        )
+                        label.set(W + "val", value)
+                        key = "sans" if value in {"•", " "} else "symbols"
+                        family = self.resolver.resolve(key, value).family
+                        props = level.find(W + "rPr")
+                        if props is None:
+                            props = etree.SubElement(level, W + "rPr")
+                        fonts = props.find(W + "rFonts")
+                        if fonts is None:
+                            fonts = etree.SubElement(props, W + "rFonts")
+                        fonts.attrib.clear()
+                        for slot in ("ascii", "hAnsi", "eastAsia", "cs"):
+                            fonts.set(W + slot, family)
                 if self.math and info.filename == "word/settings.xml":
                     math_pr = root.find(M + "mathPr")
                     if math_pr is None:
