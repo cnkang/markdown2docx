@@ -29,6 +29,7 @@ from .exceptions import (
     PandocNotFoundError,
     ValidationError,
 )
+from .output import staged_docx_output
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -190,15 +191,6 @@ class MarkdownToDocxConverter:
                 f"Table of contents depth must be between 1 and 6, got {toc_depth}",
             )
 
-        # Create output directory if it doesn't exist
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Handle existing output file
-        if output_path.exists() and not self.config.conversion.overwrite_existing:
-            raise ConversionError(
-                str(input_path), f"Output file already exists: {output_path}"
-            )
-
         # Build Pandoc arguments
         args = self._build_pandoc_args(
             toc=toc, toc_depth=toc_depth, extra_args=extra_args
@@ -207,24 +199,32 @@ class MarkdownToDocxConverter:
         logger.info("Converting %s to %s", input_path, output_path)
         logger.debug("Pandoc arguments: %s", args)
 
-        # Perform conversion
+        # Generate and validate privately before publishing the output.
         try:
-            pypandoc.convert_file(
-                str(input_path),
-                to="docx",
-                outputfile=str(output_path),
-                extra_args=args,
-            )
+            with staged_docx_output(
+                output_path, overwrite=self.config.conversion.overwrite_existing
+            ) as staged_path:
+                try:
+                    pypandoc.convert_file(
+                        str(input_path),
+                        to="docx",
+                        outputfile=str(staged_path),
+                        extra_args=args,
+                    )
+                except OSError as e:
+                    raise PandocNotFoundError() from e
+                except Exception as e:
+                    raise ConversionError(
+                        str(input_path),
+                        f"Pandoc conversion failed: {e}",
+                        original_error=e,
+                    ) from e
+                if validate_output:
+                    self._validate_docx_output(staged_path)
         except OSError as e:
-            raise PandocNotFoundError() from e
-        except Exception as e:
             raise ConversionError(
-                str(input_path), f"Pandoc conversion failed: {e}", original_error=e
+                str(input_path), f"Unable to publish DOCX output: {e}", original_error=e
             ) from e
-
-        # Validate output if requested
-        if validate_output:
-            self._validate_docx_output(output_path)
 
         logger.info("Successfully converted to %s", output_path)
         return output_path
@@ -237,7 +237,7 @@ class MarkdownToDocxConverter:
                 f"Output file must use .docx extension: {output_path}",
             )
 
-        if output_path.exists() and output_path.is_symlink():
+        if output_path.is_symlink():
             raise ConversionError(
                 input_file,
                 f"Refusing to write through symlink output path: {output_path}",

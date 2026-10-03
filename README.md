@@ -104,6 +104,22 @@ output_path = converter.convert_with_template(
 )
 ```
 
+## Output Safety
+
+Conversion and template creation reject output symlinks and untrusted symlinked
+parent directories. Documents are generated privately in a protected system temporary directory
+(independent of `TMPDIR`) and published atomically;
+`overwrite_existing=False` uses exclusive publication, including when another
+process creates the destination during conversion. Failed generation or
+validation leaves an existing output unchanged. Published files are private to
+the invoking account (mode `0600`).
+
+Secure publication requires POSIX directory-descriptor and no-follow operations
+(available on Linux and macOS). System-owned root aliases such as macOS `/var`
+and `/tmp` are supported. Platforms without these primitives, including Windows,
+fail explicitly before writing output. Use a supported platform for conversion
+until an equivalent Windows handle-based implementation is available.
+
 ## Supported Markdown Features
 
 ### Text Formatting

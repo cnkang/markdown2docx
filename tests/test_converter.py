@@ -496,11 +496,10 @@ class TestConvertWithTemplate:
                 try:
                     converter = MarkdownToDocxConverter()
                     with patch("markdown2docx.converter.pypandoc.convert_file") as mock_convert:
-                        mock_convert.return_value = None
-                        
-                        # Create the expected output file since mock won't do it
+                        mock_convert.side_effect = lambda *args, **kwargs: Path(
+                            kwargs["outputfile"]
+                        ).write_text("mock docx content", encoding="utf-8")
                         expected_output = input_path.with_suffix(".docx")
-                        expected_output.write_text("mock docx content")
                         
                         result = converter.convert_with_template(
                             input_path, 
@@ -559,11 +558,10 @@ class TestConverterIntegration:
                     converter = MarkdownToDocxConverter(reference_doc=ref_path, config=config)
                     
                     with patch("markdown2docx.converter.pypandoc.convert_file") as mock_convert:
-                        mock_convert.return_value = None
-                        
-                        # Create the expected output file since mock won't do it
+                        mock_convert.side_effect = lambda *args, **kwargs: Path(
+                            kwargs["outputfile"]
+                        ).write_text("mock docx content", encoding="utf-8")
                         expected_output = input_path.with_suffix(".docx")
-                        expected_output.write_text("mock docx content")
                         
                         result = converter.convert(
                             input_path,
@@ -615,7 +613,9 @@ class TestConverterIntegration:
                 converter = MarkdownToDocxConverter()
                 
                 with patch("markdown2docx.converter.pypandoc.convert_file") as mock_convert:
-                    mock_convert.return_value = None
+                    mock_convert.side_effect = lambda *args, **kwargs: Path(
+                        kwargs["outputfile"]
+                    ).write_text("mock docx content", encoding="utf-8")
                     
                     result = converter.convert(input_path, validate_output=False)
                     
