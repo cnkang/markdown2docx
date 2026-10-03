@@ -223,7 +223,9 @@ class MarkdownToDocxConverter:
                     try:
                         self._validate_docx_output(staged_path)
                     except ValidationError as e:
-                        raise ValidationError(str(output_path), e.validation_errors) from e
+                        raise ValidationError(
+                            str(output_path), e.validation_errors
+                        ) from e
         except OSError as e:
             raise ConversionError(
                 str(input_path), f"Unable to publish DOCX output: {e}", original_error=e
