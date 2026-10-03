@@ -204,8 +204,9 @@ def test_validation_failure_preserves_existing_output(monkeypatch, tmp_path):
         Path(outputfile).write_bytes(b"invalid")
 
     monkeypatch.setattr("markdown2docx.converter.pypandoc.convert_file", invalid)
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as error:
         MarkdownToDocxConverter().convert(source, validate_output=True)
+    assert error.value.output_file == str(output)
     assert output.read_bytes() == b"original"
 
 
