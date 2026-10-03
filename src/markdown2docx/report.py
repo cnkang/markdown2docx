@@ -67,6 +67,8 @@ def render_preview(
             images: list[str] = []
             raster = shutil.which("pdftoppm")
             if raster:
+                for stale in output_dir.glob("page-*.png"):
+                    stale.unlink()
                 rasterized = subprocess.run(
                     [
                         raster,

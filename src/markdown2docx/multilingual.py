@@ -36,6 +36,22 @@ TOC_TITLES = {
 }
 
 
+# Detect emoji components without classifying ordinary digits as emoji. Strip
+# whole graphemes to include keycap bases, variation selectors and ZWJ sequences.
+EMOJI_PATTERN = regex.compile(
+    r"\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F|"
+    r"\p{Regional_Indicator}|\p{Emoji_Modifier}|\u20e3"
+)
+
+
+def strip_emoji(text: str) -> str:
+    return "".join(
+        cluster
+        for cluster in regex.findall(r"\X", text)
+        if not EMOJI_PATTERN.search(cluster)
+    )
+
+
 def language(value: str | None) -> str | None:
     if value is None:
         return None
@@ -118,7 +134,7 @@ def fragments(
         if (
             unicodedata.category(cluster[0]) in {"Sm", "So"}
             and ord(cluster[0]) >= 0x2000
-            and not regex.search(r"\p{Extended_Pictographic}", cluster)
+            and not EMOJI_PATTERN.search(cluster)
         ):
             key = (
                 "math"
@@ -199,6 +215,14 @@ class MultilingualDocument:
             self.warnings.append({"code": code, "message": message})
             self._warned.add(code)
 
+    def _checked_text(self, text: str) -> str:
+        if EMOJI_PATTERN.search(text):
+            self.warn(
+                "EMOJI_UNVERIFIED",
+                "Color emoji rendering is not supported; verify the preview",
+            )
+        return strip_emoji(text)
+
     def annotate(self) -> dict[str, Any]:
         self.ast["blocks"] = self._walk(
             self.ast["blocks"], self.lang, self.base_direction, "", "ltr"
@@ -235,11 +259,15 @@ class MultilingualDocument:
         self.ast["meta"].setdefault("toc-title", {"t": "MetaString", "c": title})
         self.resolver.resolve(
             "sans",
-            title if title_key not in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"} else "",
+            (
+                self._checked_text(title)
+                if title_key not in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}
+                else ""
+            ),
         )
         if title_key in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}:
             key = "arabic" if title_key == "ar" else cjk_key(title_key, title)[0]
-            self.resolver.resolve(key, title)
+            self.resolver.resolve(key, self._checked_text(title))
         return self.ast
 
     def _mark(
@@ -256,16 +284,7 @@ class MultilingualDocument:
         for key, part, rtl, name in fragments(text, lang, context, code=code):
             if key == "sans" and self._role == "heading":
                 key = "heading"
-            if regex.search(r"\p{Extended_Pictographic}", part):
-                self.warn(
-                    "EMOJI_UNVERIFIED",
-                    "Color emoji rendering is not supported; verify the preview",
-                )
-                # Warn rather than require unsupported color glyphs from text fonts.
-                checked = regex.sub(r"\p{Extended_Pictographic}", "", part)
-            else:
-                checked = part
-            self.resolver.resolve(key, checked)
+            self.resolver.resolve(key, self._checked_text(part))
             self.scripts.add(name)
             if name == "Han" and cjk_key(lang, context)[1]:
                 self.warn(
@@ -360,7 +379,7 @@ class MultilingualDocument:
             for key, part, _, name in fragments(
                 content[1], lang, content[1], code=True
             ):
-                self.resolver.resolve(key, part)
+                self.resolver.resolve(key, self._checked_text(part))
                 self.scripts.add(name)
             # A code block's own attributes survive syntax highlighting via its ID.
             content[0][0] = f"MD2DCODE{len(self.code_blocks)-1}"
@@ -402,7 +421,7 @@ class MultilingualDocument:
                 root = etree.fromstring(data, parser)
                 if self.math:
                     for value in root.xpath("//m:t/text()", namespaces=NS):
-                        self.resolver.resolve("math", value)
+                        self.resolver.resolve("math", self._checked_text(value))
                 before.extend(root.xpath("//w:t/text()", namespaces=NS))
                 for paragraph in root.iter(W + "p"):
                     style = paragraph.find(W + "pPr/" + W + "pStyle")
@@ -438,7 +457,13 @@ class MultilingualDocument:
                             observed[marker] = observed.get(marker, "") + "".join(
                                 run.xpath("./w:t/text()", namespaces=NS)
                             )
-                            run_style.getparent().remove(run_style)
+                            if any(
+                                parent.tag == W + "hyperlink"
+                                for parent in run.iterancestors()
+                            ):
+                                run_style.set(W + "val", "Hyperlink")
+                            else:
+                                run_style.getparent().remove(run_style)
                             self._properties(run, spec)
                             self._paragraph(paragraph, spec.paragraph_direction)
                             marked_paragraph = True
@@ -498,7 +523,9 @@ class MultilingualDocument:
                         )
                         label.set(W + "val", value)
                         key = "sans" if value in {"•", " "} else "symbols"
-                        family = self.resolver.resolve(key, value).family
+                        family = self.resolver.resolve(
+                            key, self._checked_text(value)
+                        ).family
                         props = level.find(W + "rPr")
                         if props is None:
                             props = etree.SubElement(level, W + "rPr")
@@ -555,6 +582,8 @@ class MultilingualDocument:
         parts = fragments(text, lang, context, code=code)
         if not parts:
             return
+        for key, part, _, _ in parts:
+            self.resolver.resolve(key, self._checked_text(part))
         parent = run.getparent()
         text_children = run.findall(W + "t")
         if len(text_children) != 1 or any(
@@ -570,7 +599,6 @@ class MultilingualDocument:
             return
         index = parent.index(run)
         for offset, (key, part, rtl, name) in enumerate(parts):
-            self.resolver.resolve(key, part)
             clone = copy.deepcopy(run)
             clone.find(W + "t").text = part
             self._properties(

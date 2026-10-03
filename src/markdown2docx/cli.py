@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Never, Optional
 
-from .config import MarkdownToDocxConfig, load_config
+from .config import MarkdownToDocxConfig, TemplateConfig, load_config
 from .converter import MarkdownToDocxConverter
 from .exceptions import MarkdownToDocxError
 from .messages import HELP_ZH, message
@@ -190,19 +190,22 @@ def setup_logging(verbose: bool = False, quiet: bool = False) -> None:
     )
 
 
-def handle_template_creation(template_path: str, verbose: bool = False) -> int:
+def handle_template_creation(
+    template_path: str, verbose: bool = False, *, config: TemplateConfig | None = None
+) -> int:
     """Handle template creation command.
 
     Args:
         template_path: Path where template should be created
         verbose: Whether to show verbose output
+        config: Loaded template layout and fonts
 
     Returns:
         Exit code (0 for success, 1 for error)
     """
     try:
         output_path = DocxTemplateManager.create_modern_template(
-            template_path, add_sample=True
+            template_path, config=config, add_sample=True
         )
 
         if not verbose:
@@ -395,7 +398,9 @@ def main() -> None:
             sys.exit(1)
         return
     if args.create_template:
-        exit_code = handle_template_creation(args.create_template, args.verbose)
+        exit_code = handle_template_creation(
+            args.create_template, args.verbose, config=config.template
+        )
         if exit_code != 0:
             sys.exit(exit_code)
         return
@@ -440,6 +445,15 @@ def main() -> None:
                 print(json.dumps(report.to_dict(), ensure_ascii=False))
             elif not args.quiet:
                 print(message(args.ui_lang, "success", path=report.output_path))
+                if args.render:
+                    print(
+                        message(
+                            args.ui_lang,
+                            "preview",
+                            status=report.preview.get("status", "unverified"),
+                            reason=report.preview.get("reason", ""),
+                        )
+                    )
                 for warning in report.warnings:
                     print(message(args.ui_lang, "warning", **warning), file=sys.stderr)
         except Exception as exc:
