@@ -31,9 +31,8 @@ jobs:
       - name: Install pinned Pandoc
         run: |
           uv run python - <<'PY'
-          import os, platform
+          import os, platform, shutil, tempfile, urllib.request
           from pathlib import Path
-          import pypandoc
           target = Path('.tools').absolute()
           target.mkdir(exist_ok=True)
           assets = {
@@ -42,8 +41,18 @@ jobs:
               'Linux': 'pandoc-3.12-linux-amd64.tar.gz',
           }
           url = 'https://github.com/jgm/pandoc/releases/download/3.12/' + assets[platform.system()]
-          pypandoc.download_pandoc(url=url, version='3.12', targetfolder=str(target), delete_installer=True)
-          binary = target / ('pandoc.exe' if os.name == 'nt' else 'pandoc')
+          executable = 'pandoc.exe' if os.name == 'nt' else 'pandoc'
+          binary = target / executable
+          with tempfile.TemporaryDirectory() as temporary:
+              root = Path(temporary)
+              archive = root / assets[platform.system()]
+              urllib.request.urlretrieve(url, archive)
+              extracted = root / 'extracted'
+              shutil.unpack_archive(archive, extracted)
+              candidates = [p for p in extracted.rglob(executable) if p.is_file()]
+              assert len(candidates) == 1, candidates
+              shutil.copy2(candidates[0], binary)
+              binary.chmod(0o755)
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
               env.write(f'PYPANDOC_PANDOC={binary}\n')
           PY

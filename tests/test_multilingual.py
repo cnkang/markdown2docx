@@ -91,6 +91,15 @@ def test_comprehensive_single_file(tmp_path):
     assert document.xpath("//w:instrText[contains(., 'TOC')]", namespaces=NS)
     assert document.xpath("//m:oMath", namespaces=NS)
     assert document.xpath("//w:drawing", namespaces=NS)
+    numbering = roots["word/numbering.xml"]
+    assert all(
+        font.startswith("Noto ")
+        for font in numbering.xpath("//w:rFonts/@w:ascii", namespaces=NS)
+    )
+    assert not any(
+        "\uf0b7" in value or "\uf0a7" in value
+        for value in numbering.xpath("//w:lvlText/@w:val", namespaces=NS)
+    )
 
 
 def test_local_language_and_code_region(tmp_path):
