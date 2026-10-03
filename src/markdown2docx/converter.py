@@ -7,7 +7,11 @@ type safety, and configuration management.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
@@ -29,7 +33,11 @@ from .exceptions import (
     PandocNotFoundError,
     ValidationError,
 )
+from .fonts import FontResolver
+from .multilingual import MultilingualDocument, text_of
 from .output import staged_docx_output
+from .report import ConversionReport, render_preview
+from .templates import DocxTemplateManager
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -128,111 +136,286 @@ class MarkdownToDocxConverter:
         self,
         input_path: Union[str, Path],
         output_path: Optional[Union[str, Path]] = None,
+        **kwargs: Any,
+    ) -> Path:
+        """Convert with the multilingual pipeline; preserve the Path return value."""
+        report = self.convert_with_report(input_path, output_path, **kwargs)
+        for warning in report.warnings:
+            logger.warning("%s: %s", warning["code"], warning["message"])
+        return Path(report.output_path)
+
+    def convert_with_report(
+        self,
+        input_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
         *,
         toc: Optional[bool] = None,
         toc_depth: Optional[int] = None,
         extra_args: Optional[Sequence[str]] = None,
         validate_output: Optional[bool] = None,
-    ) -> Path:
-        """Convert a Markdown file to DOCX format.
+        lang: str | None = None,
+        direction: str | None = None,
+        offline: bool | None = None,
+        allow_unverified_fonts: bool | None = None,
+        render: bool = False,
+        preview_dir: str | Path | None = None,
+    ) -> ConversionReport:
+        """Convert atomically, returning separate integrity and rendering evidence.
 
-        Args:
-            input_path: Path to the input Markdown file.
-            output_path: Optional path for the output DOCX file.
-                        If None, uses input filename with .docx extension.
-            toc: Whether to include table of contents.
-                If None, uses configuration default.
-            toc_depth: Depth of table of contents (1-6).
-                      If None, uses configuration default.
-            extra_args: Additional Pandoc command line arguments.
-            validate_output: Whether to validate the output DOCX file.
-                           If None, uses configuration default.
-
-        Returns:
-            Path to the generated DOCX file.
-
-        Raises:
-            FileNotFoundError: If the input file does not exist.
-            ConversionError: If the conversion process fails.
-            ValidationError: If output validation fails (when enabled).
-
-        Example:
-            >>> converter = MarkdownToDocxConverter()
-            >>> output = converter.convert("document.md", toc=True, toc_depth=2)
-            >>> print(f"Generated: {output}")
+        Explicit document settings override Markdown metadata and configuration.
+        Fonts are referenced, never embedded or installed into the operating system.
+        Structural and text-integrity checks always run; validate_output is retained
+        for API compatibility and cannot disable the required publication checks.
         """
-        # Validate and prepare paths
         input_path = Path(input_path)
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
-
         if not input_path.is_file():
             raise ConversionError(
                 str(input_path), "Input path must be a file, not a directory"
             )
-
         output_path = (
             Path(output_path) if output_path else input_path.with_suffix(".docx")
         )
         self._validate_output_path(output_path, str(input_path))
-
-        # Use configuration defaults if not specified
-        if toc is None:
-            toc = self.config.conversion.default_toc
-        if toc_depth is None:
-            toc_depth = self.config.conversion.default_toc_depth
-        if validate_output is None:
-            validate_output = self.config.conversion.validate_output
-
-        # Validate toc_depth
+        toc = self.config.conversion.default_toc if toc is None else toc
+        toc_depth = (
+            self.config.conversion.default_toc_depth if toc_depth is None else toc_depth
+        )
         if not 1 <= toc_depth <= 6:
             raise ConversionError(
                 str(input_path),
                 f"Table of contents depth must be between 1 and 6, got {toc_depth}",
             )
-
-        # Build Pandoc arguments
         args = self._build_pandoc_args(
             toc=toc, toc_depth=toc_depth, extra_args=extra_args
         )
+        if self.reference_doc:
+            from docx import Document
 
-        logger.info("Converting %s to %s", input_path, output_path)
-        logger.debug("Pandoc arguments: %s", args)
+            from .exceptions import TemplateError
 
-        # Generate and validate privately before publishing the output.
+            try:
+                Document(str(self.reference_doc))
+            except Exception as exc:
+                raise TemplateError(
+                    str(self.reference_doc), f"Invalid DOCX template: {exc}"
+                ) from exc
         try:
-            with staged_docx_output(
-                output_path, overwrite=self.config.conversion.overwrite_existing
-            ) as staged_path:
-                try:
-                    pypandoc.convert_file(
-                        str(input_path),
-                        to="docx",
-                        outputfile=str(staged_path),
-                        extra_args=args,
-                    )
-                except OSError as e:
-                    raise PandocNotFoundError() from e
-                except Exception as e:
-                    raise ConversionError(
-                        str(input_path),
-                        f"Pandoc conversion failed: {e}",
-                        original_error=e,
-                    ) from e
-                if validate_output:
-                    try:
-                        self._validate_docx_output(staged_path)
-                    except ValidationError as e:
-                        raise ValidationError(
-                            str(output_path), e.validation_errors
-                        ) from e
-        except OSError as e:
+            parsed = subprocess.run(
+                [
+                    pypandoc.get_pandoc_path(),
+                    "-f",
+                    self.config.pandoc.reader_format,
+                    "-t",
+                    "json",
+                    str(input_path.absolute()),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=True,
+                timeout=self.config.pandoc.timeout_seconds,
+            )
+            ast = json.loads(parsed.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
             raise ConversionError(
-                str(input_path), f"Unable to publish DOCX output: {e}", original_error=e
-            ) from e
+                str(input_path), f"Unable to parse Markdown: {exc}", exc
+            ) from exc
+        metadata = ast.get("meta", {})
 
-        logger.info("Successfully converted to %s", output_path)
-        return output_path
+        def meta_string(key: str) -> str | None:
+            value = metadata.get(key)
+            if not value:
+                return None
+            if value["t"] == "MetaString":
+                return str(value["c"])
+            return text_of(value) or None
+
+        options = self.config.international
+        document_lang = (
+            lang if lang is not None else (meta_string("lang") or options.lang)
+        )
+        document_dir = (
+            direction
+            if direction is not None
+            else (meta_string("dir") or options.direction)
+        )
+        resolver = FontResolver(
+            offline=options.offline if offline is None else offline,
+            cache=Path(options.font_cache) if options.font_cache else None,
+        )
+        allow = (
+            options.allow_unverified_fonts
+            if allow_unverified_fonts is None
+            else allow_unverified_fonts
+        )
+        for family in {
+            self.config.template.body_font,
+            self.config.template.heading_font,
+            self.config.template.code_font,
+        }:
+            # Default code fonts are acquired only when needed by content.
+            if family != "Noto Sans Mono":
+                resolver.audit_family(family, allow_unverified=allow)
+        for role, family, default in (
+            ("sans", self.config.template.body_font, "Noto Sans"),
+            ("heading", self.config.template.heading_font, "Noto Sans"),
+            ("mono", self.config.template.code_font, "Noto Sans Mono"),
+        ):
+            if family != default:
+                resolver.aliases[role] = resolver.audit_family(
+                    family, allow_unverified=allow
+                )
+        document = MultilingualDocument(
+            ast, resolver, lang=document_lang, base_direction=document_dir
+        )
+        document.code_size_pt = self.config.template.code_size_pt
+        annotated = document.annotate()
+        with tempfile.TemporaryDirectory(prefix="md2docx-convert-") as temporary:
+            root = Path(temporary)
+            ast_path = root / "input.json"
+            ast_path.write_text(
+                json.dumps(annotated, ensure_ascii=False), encoding="utf-8"
+            )
+            # JSON input is the annotated AST, not a second Markdown parse.
+            args[args.index("-f") + 1] = "json"
+            args.extend(
+                [
+                    "--resource-path",
+                    str(input_path.absolute().parent) + os.pathsep + str(Path.cwd()),
+                ]
+            )
+            if self.reference_doc is None:
+                reference = DocxTemplateManager.create_reference(
+                    root / "reference.docx", self.config.template
+                )
+                args.extend(["--reference-doc", str(reference)])
+            try:
+                with staged_docx_output(
+                    output_path, overwrite=self.config.conversion.overwrite_existing
+                ) as stage:
+                    try:
+                        pypandoc.convert_file(
+                            str(ast_path),
+                            to="docx",
+                            format="json",
+                            outputfile=str(stage),
+                            extra_args=args,
+                        )
+                    except OSError as exc:
+                        raise PandocNotFoundError() from exc
+                    except Exception as exc:
+                        raise ConversionError(
+                            str(input_path), f"Pandoc conversion failed: {exc}", exc
+                        ) from exc
+                    try:
+                        self._validate_docx_output(stage)
+                        if self.reference_doc:
+                            self._audit_template(stage, resolver, allow)
+                        checks = document.apply(stage)
+                        self._validate_docx_output(stage)
+                    except ValidationError as exc:
+                        raise ValidationError(
+                            str(output_path), exc.validation_errors
+                        ) from exc
+                    checks["structure"] = "passed"
+                    preview = (
+                        render_preview(
+                            stage,
+                            (
+                                Path(preview_dir)
+                                if preview_dir
+                                else output_path.with_suffix(".preview")
+                            ),
+                            resolver,
+                        )
+                        if render
+                        else {
+                            "status": "unverified",
+                            "reason": "Rendering not requested",
+                        }
+                    )
+                    checks["rendering"] = preview["status"]
+            except OSError as exc:
+                raise ConversionError(
+                    str(input_path), f"Unable to publish DOCX output: {exc}", exc
+                ) from exc
+        warnings = list(document.warnings)
+        if any(font.source == "cache" for font in resolver.selected.values()):
+            warnings.append(
+                {
+                    "code": "FONT_INSTALLATION_REQUIRED",
+                    "message": "Cached fonts are not installed or embedded. Install the reported fonts on viewing machines.",
+                }
+            )
+        if any(not font.verified for font in resolver.selected.values()):
+            warnings.append(
+                {
+                    "code": "FONT_LICENSE_UNVERIFIED",
+                    "message": "Unverified fonts were explicitly allowed",
+                }
+            )
+        return ConversionReport(
+            str(output_path),
+            document.lang,
+            sorted(document.languages),
+            sorted(document.scripts),
+            [font.report() for font in resolver.selected.values()],
+            warnings,
+            checks,
+            preview,
+        )
+
+    @staticmethod
+    def _audit_template(path: Path, resolver: FontResolver, allow: bool) -> None:
+        from lxml import etree
+
+        from .exceptions import TemplateError
+        from .multilingual import NS, W
+
+        try:
+            with zipfile.ZipFile(path) as archive:
+                parser = etree.XMLParser(resolve_entities=False, no_network=True)
+                root = etree.fromstring(archive.read("word/styles.xml"), parser)
+                active = {"Normal"}
+                for name in archive.namelist():
+                    if (
+                        name.startswith("word/")
+                        and name.endswith(".xml")
+                        and name != "word/styles.xml"
+                    ):
+                        part = etree.fromstring(archive.read(name), parser)
+                        active.update(
+                            part.xpath(
+                                "//w:pStyle/@w:val | //w:rStyle/@w:val", namespaces=NS
+                            )
+                        )
+                styles = {
+                    element.get(W + "styleId"): element
+                    for element in root.findall(W + "style")
+                }
+                pending = list(active)
+                while pending:
+                    element = styles.get(pending.pop())
+                    if element is not None:
+                        base = element.find(W + "basedOn")
+                        if base is not None and base.get(W + "val") not in active:
+                            active.add(base.get(W + "val"))
+                            pending.append(base.get(W + "val"))
+                families = {
+                    value
+                    for style in root.findall(W + "style")
+                    if style.get(W + "styleId") in active
+                    for element in style.iter(W + "rFonts")
+                    for key, value in element.attrib.items()
+                    if key
+                    in {W + slot for slot in ("ascii", "hAnsi", "eastAsia", "cs")}
+                }
+                for family in families:
+                    resolver.audit_family(family, allow_unverified=allow)
+        except (OSError, zipfile.BadZipFile, KeyError, etree.XMLSyntaxError) as exc:
+            raise TemplateError(str(path), f"Invalid DOCX template: {exc}") from exc
 
     def _validate_output_path(self, output_path: Path, input_file: str) -> None:
         """Validate output path safety constraints before writing files."""
@@ -242,7 +425,7 @@ class MarkdownToDocxConverter:
                 f"Output file must use .docx extension: {output_path}",
             )
 
-        if output_path.is_symlink():
+        if output_path.exists() and output_path.is_symlink():
             raise ConversionError(
                 input_file,
                 f"Refusing to write through symlink output path: {output_path}",
@@ -270,13 +453,31 @@ class MarkdownToDocxConverter:
                 args.extend(["--reference-doc", str(self.reference_doc)])
                 logger.debug("Using reference document: %s", self.reference_doc)
             else:
-                logger.warning(
-                    "Reference document not found: %s. Proceeding without template.",
-                    self.reference_doc,
+                from .exceptions import TemplateError
+
+                raise TemplateError(
+                    str(self.reference_doc),
+                    f"Reference document not found: {self.reference_doc}",
                 )
 
         # Add any extra arguments provided by caller
         if extra_args:
+            reserved = {
+                "-f",
+                "--from",
+                "--read",
+                "-t",
+                "--to",
+                "--write",
+                "-o",
+                "--output",
+                "--reference-doc",
+            }
+            if any(argument.split("=", 1)[0] in reserved for argument in extra_args):
+                raise ConversionError(
+                    "",
+                    "Use the converter options instead of overriding the input/output format or template via extra_args",
+                )
             args.extend(extra_args)
             logger.debug("Added extra arguments: %s", extra_args)
 

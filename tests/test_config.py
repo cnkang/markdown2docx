@@ -402,4 +402,4 @@ class TestConfigurationIntegration:
 
             # These should remain defaults
             assert config.pandoc.min_version == "2.19"  # Default
-            assert config.template.body_font == "Calibri"  # Default
+            assert config.template.body_font == "Noto Sans"  # Default

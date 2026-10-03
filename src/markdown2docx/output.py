@@ -153,6 +153,10 @@ def _writer_temporary_root() -> Path:
 @contextlib.contextmanager
 def staged_docx_output(destination: Path, *, overwrite: bool = True) -> Iterator[Path]:
     """Yield a private writer path and safely publish it after successful use."""
+    if os.name == "nt":
+        with _windows_output(destination, overwrite=overwrite) as source:
+            yield source
+        return
     parent = _open_parent(destination.parent)
     try:
         _check_destination(destination.name, parent, overwrite)
@@ -164,3 +168,83 @@ def staged_docx_output(destination: Path, *, overwrite: bool = True) -> Iterator
             _publish(source, destination, parent, overwrite)
     finally:
         os.close(parent)
+
+
+@contextlib.contextmanager
+def _windows_output(destination: Path, *, overwrite: bool) -> Iterator[Path]:
+    """Pin Windows directory handles without delete sharing; reject reparse points.
+
+    Omitting FILE_SHARE_DELETE prevents ancestors from being renamed/replaced
+    while path-based writing and publication are in progress.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    kernel.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
+
+    class Attributes(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+    handles = []
+
+    def pin(path: Path) -> None:
+        handle = kernel.CreateFileW(str(path), 0x80, 0x3, None, 3, 0x02200000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+        info = Attributes()
+        if not kernel.GetFileInformationByHandleEx(
+            handle, 9, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            kernel.CloseHandle(handle)
+            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+        if info.attributes & 0x400 or not info.attributes & 0x10:
+            kernel.CloseHandle(handle)
+            raise OSError(f"Refusing unsafe output directory/reparse point: {path}")
+        handles.append(handle)
+
+    absolute = destination.absolute()
+    try:
+        for ancestor in reversed([absolute.parent, *absolute.parent.parents]):
+            ancestor.mkdir(exist_ok=True)
+            pin(ancestor)
+        if absolute.is_symlink():
+            raise OSError("Refusing symlink output path")
+        if absolute.exists() and (not overwrite or not absolute.is_file()):
+            raise FileExistsError(f"Output file already exists: {absolute}")
+        with tempfile.TemporaryDirectory(
+            prefix=".markdown2docx-", dir=absolute.parent
+        ) as temporary:
+            pin(Path(temporary))
+            try:
+                source = Path(temporary) / "document.docx"
+                yield source
+                if absolute.is_symlink():
+                    raise OSError("Refusing symlink output path")
+                if overwrite:
+                    os.replace(source, absolute)
+                else:
+                    os.link(source, absolute)
+            finally:
+                kernel.CloseHandle(handles.pop())
+    finally:
+        for handle in reversed(handles):
+            kernel.CloseHandle(handle)

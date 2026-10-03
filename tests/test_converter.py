@@ -483,40 +483,14 @@ class TestConversionErrors:
 class TestConvertWithTemplate:
     """Test template-based conversion."""
 
-    def test_convert_with_template_success(self):
-        """Test successful template-based conversion."""
-        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as md_tmp:
-            md_tmp.write("# Test Document\nThis is a test.")
-            md_tmp.flush()
-            input_path = Path(md_tmp.name)
-            
-            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as docx_tmp:
-                template_path = Path(docx_tmp.name)
-                
-                try:
-                    converter = MarkdownToDocxConverter()
-                    with patch("markdown2docx.converter.pypandoc.convert_file") as mock_convert:
-                        mock_convert.side_effect = lambda *args, **kwargs: Path(
-                            kwargs["outputfile"]
-                        ).write_text("mock docx content", encoding="utf-8")
-                        expected_output = input_path.with_suffix(".docx")
-                        
-                        result = converter.convert_with_template(
-                            input_path, 
-                            template_path,
-                            validate_output=False
-                        )
-                        
-                        assert result.exists()
-                        mock_convert.assert_called_once()
-                        
-                        # Clean up
-                        expected_output.unlink()
-                finally:
-                    input_path.unlink()
-                    template_path.unlink()
-                    if result and result.exists():
-                        result.unlink()
+    def test_convert_with_template_success(self, tmp_path):
+        source = tmp_path / "input.md"
+        source.write_text("# Test Document\n\nThis is a test.")
+        template = tmp_path / "reference.docx"
+        DocxTemplateManager.create_modern_template(template)
+        result = MarkdownToDocxConverter().convert_with_template(source, template)
+        from docx import Document
+        assert "This is a test." in "\n".join(p.text for p in Document(result).paragraphs)
 
     def test_convert_with_template_nonexistent_template(self):
         """Test template conversion with nonexistent template."""
@@ -542,56 +516,19 @@ class TestConvertWithTemplate:
 class TestConverterIntegration:
     """Test converter integration scenarios."""
 
-    def test_converter_with_all_options(self):
-        """Test converter with all available options."""
-        config = MarkdownToDocxConfig()
-        
-        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as md_tmp:
-            md_tmp.write("# Test Document\n\n## Section 1\nContent here.\n\n## Section 2\nMore content.")
-            md_tmp.flush()
-            input_path = Path(md_tmp.name)
-            
-            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as ref_tmp:
-                ref_path = Path(ref_tmp.name)
-                
-                try:
-                    converter = MarkdownToDocxConverter(reference_doc=ref_path, config=config)
-                    
-                    with patch("markdown2docx.converter.pypandoc.convert_file") as mock_convert:
-                        mock_convert.side_effect = lambda *args, **kwargs: Path(
-                            kwargs["outputfile"]
-                        ).write_text("mock docx content", encoding="utf-8")
-                        expected_output = input_path.with_suffix(".docx")
-                        
-                        result = converter.convert(
-                            input_path,
-                            toc=True,
-                            toc_depth=2,
-                            extra_args=["--number-sections"],
-                            validate_output=False
-                        )
-                        
-                        assert result.exists()
-                        
-                        # Clean up
-                        expected_output.unlink()
-                        
-                        # Verify pandoc was called with correct arguments
-                        mock_convert.assert_called_once()
-                        call_args = mock_convert.call_args
-                        
-                        # Check that TOC and reference doc arguments were included
-                        pandoc_args = call_args[1]["extra_args"]
-                        assert "--toc" in pandoc_args
-                        assert "--toc-depth" in pandoc_args and "2" in pandoc_args
-                        assert "--reference-doc" in pandoc_args and str(ref_path) in pandoc_args
-                        assert "--number-sections" in pandoc_args
-                        
-                finally:
-                    input_path.unlink()
-                    ref_path.unlink()
-                    if result and result.exists():
-                        result.unlink()
+    def test_converter_with_all_options(self, tmp_path):
+        import pypandoc
+        source = tmp_path / "input.md"
+        source.write_text("# Test Document\n\n## Section\nContent here.")
+        reference = tmp_path / "reference.docx"
+        DocxTemplateManager.create_modern_template(reference)
+        converter = MarkdownToDocxConverter(reference_doc=reference)
+        with patch("markdown2docx.converter.pypandoc.convert_file", wraps=pypandoc.convert_file) as writer:
+            result = converter.convert(source, toc=True, toc_depth=2, extra_args=["--number-sections"])
+        assert result.exists()
+        args = writer.call_args.kwargs["extra_args"]
+        assert "--toc" in args and "--number-sections" in args
+        assert str(reference) in args
 
     @patch("markdown2docx.converter.pypandoc.get_pandoc_version")
     def test_converter_initialization_with_validation(self, mock_get_version):
@@ -602,29 +539,9 @@ class TestConverterIntegration:
         converter = MarkdownToDocxConverter()
         mock_get_version.assert_called_once()
 
-    def test_output_path_generation(self):
-        """Test automatic output path generation."""
-        with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as tmp:
-            tmp.write("# Test\nContent")
-            tmp.flush()
-            input_path = Path(tmp.name)
-            
-            try:
-                converter = MarkdownToDocxConverter()
-                
-                with patch("markdown2docx.converter.pypandoc.convert_file") as mock_convert:
-                    mock_convert.side_effect = lambda *args, **kwargs: Path(
-                        kwargs["outputfile"]
-                    ).write_text("mock docx content", encoding="utf-8")
-                    
-                    result = converter.convert(input_path, validate_output=False)
-                    
-                    # Output should be same name with .docx extension
-                    expected_output = input_path.with_suffix(".docx")
-                    assert result == expected_output
-                    
-            finally:
-                input_path.unlink()
-                expected_output = input_path.with_suffix(".docx")
-                if expected_output.exists():
-                    expected_output.unlink()
+    def test_output_path_generation(self, tmp_path):
+        source = tmp_path / "input.md"
+        source.write_text("# Test\n\nContent")
+        result = MarkdownToDocxConverter().convert(source, validate_output=False)
+        assert result == source.with_suffix(".docx")
+        assert result.is_file()

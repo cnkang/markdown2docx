@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
@@ -360,6 +361,58 @@ class DocxTemplateManager:
             target.set(f"{w}val", mode)
 
     # ---------- Static method for backward compatibility ----------
+
+    @classmethod
+    def create_reference(cls, output_path: Path, config: TemplateConfig) -> Path:
+        """Derive a content-free reference from the installed Pandoc defaults."""
+        import pypandoc
+        from docx.oxml.ns import qn
+
+        result = subprocess.run(
+            [pypandoc.get_pandoc_path(), "--print-default-data-file", "reference.docx"],
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+        output_path.write_bytes(result.stdout)
+        doc = Document(str(output_path))
+        manager = cls(config=config)
+        manager._configure_page_layout(doc)
+        manager._configure_core_styles(doc)
+        for style in doc.styles:
+            code = style.name in {"Source Code", "Verbatim Char", "Code Block"}
+            family = (
+                config.code_font
+                if code
+                else (
+                    config.heading_font
+                    if style.name.startswith("Heading")
+                    else config.body_font
+                )
+            )
+            style.font.name = family
+            props = style.element.get_or_add_rPr()
+            fonts = props.find(qn("w:rFonts"))
+            for attr in list(fonts.attrib):
+                if attr.endswith("Theme"):
+                    del fonts.attrib[attr]
+            for slot in ("ascii", "hAnsi", "eastAsia", "cs"):
+                fonts.set(qn("w:" + slot), family)
+            if code:
+                style.font.size = Pt(config.code_size_pt)
+        defaults = doc.styles.element.find(qn("w:docDefaults"))
+        if defaults is not None:
+            for fonts in defaults.iter(qn("w:rFonts")):
+                fonts.attrib.clear()
+                for slot in ("ascii", "hAnsi", "eastAsia", "cs"):
+                    fonts.set(qn("w:" + slot), config.body_font)
+        # No sample content is copied into a generated document.
+        body = doc.element.body
+        for child in list(body):
+            if child.tag != qn("w:sectPr"):
+                body.remove(child)
+        doc.save(str(output_path))
+        return output_path
 
     @classmethod
     def create_default_template(cls, output_path: str | Path) -> Path:

@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX directory descriptor race tests")
 from docx import Document
 from docx.document import Document as DocumentType
 
@@ -26,9 +28,12 @@ def render_docx_fixture(request, monkeypatch, tmp_path):
                 MarkdownToDocxConverter, "_validate_pandoc", lambda _: None
             )
 
-            def convert(*_args, outputfile, **_kwargs):
+            from markdown2docx.converter import pypandoc
+            original_convert = pypandoc.convert_file
+
+            def convert(*args, outputfile, **kwargs):
                 before_write()
-                Document().save(outputfile)
+                return original_convert(*args, outputfile=outputfile, **kwargs)
 
             monkeypatch.setattr(
                 "markdown2docx.converter.pypandoc.convert_file", convert
