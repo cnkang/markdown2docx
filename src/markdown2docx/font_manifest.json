@@ -1,0 +1,103 @@
+{
+  "fonts": {
+    "sans": {
+      "family": "Noto Sans",
+      "filename": "NotoSans-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "sha256": "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "license_filename": "noto-fonts-OFL.txt",
+      "license_sha256": "0dab92d0544f7b233403f14b84a663bdbfa746982eda629e7f4f9ffe1b036feb"
+    },
+    "mono": {
+      "family": "Noto Sans Mono",
+      "filename": "NotoSansMono-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansMono/NotoSansMono-Regular.ttf",
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "sha256": "d9e2b23d19f8230be7146f409a52b1d23117e635e28f2e2892cf91b7382f325b",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "license_filename": "noto-fonts-OFL.txt",
+      "license_sha256": "0dab92d0544f7b233403f14b84a663bdbfa746982eda629e7f4f9ffe1b036feb"
+    },
+    "arabic": {
+      "family": "Noto Sans Arabic",
+      "filename": "NotoSansArabic-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf",
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "sha256": "ceea25b464a656dc3b26849bab9356740401af62aedf1bfa8b7f0d9b75925b1b",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "license_filename": "noto-fonts-OFL.txt",
+      "license_sha256": "0dab92d0544f7b233403f14b84a663bdbfa746982eda629e7f4f9ffe1b036feb"
+    },
+    "math": {
+      "family": "Noto Sans Math",
+      "filename": "NotoSansMath-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/unhinted/ttf/NotoSansMath/NotoSansMath-Regular.ttf",
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "sha256": "ff5e5e7638e05bf7bc159d8801a28a40eddf76c155bec4fee53150babd795e1a",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "license_filename": "noto-fonts-OFL.txt",
+      "license_sha256": "0dab92d0544f7b233403f14b84a663bdbfa746982eda629e7f4f9ffe1b036feb"
+    },
+    "cjk-sc": {
+      "family": "Noto Sans CJK SC",
+      "filename": "NotoSansCJKsc-Regular.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "license_filename": "noto-cjk-OFL.txt",
+      "license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    "cjk-tc": {
+      "family": "Noto Sans CJK TC",
+      "filename": "NotoSansCJKtc-Regular.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf",
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "sha256": "dce08bd4fd91aa8aa76ed8fea4b694c2dfb8550f67871e326843212ddbeb88b4",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "license_filename": "noto-cjk-OFL.txt",
+      "license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    "cjk-jp": {
+      "family": "Noto Sans CJK JP",
+      "filename": "NotoSansCJKjp-Regular.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "sha256": "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "license_filename": "noto-cjk-OFL.txt",
+      "license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    "cjk-kr": {
+      "family": "Noto Sans CJK KR",
+      "filename": "NotoSansCJKkr-Regular.otf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/OTF/Korean/NotoSansCJKkr-Regular.otf",
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "sha256": "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "license_filename": "noto-cjk-OFL.txt",
+      "license_sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    },
+    "symbols": {
+      "family": "Noto Sans Symbols2",
+      "filename": "NotoSansSymbols2-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/unhinted/ttf/NotoSansSymbols2/NotoSansSymbols2-Regular.ttf",
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "sha256": "882d142b9a1ef3fd7fa4225dbe95c10fab6664206eb4964c8ff705a4f6d02988",
+      "license": "OFL-1.1",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "license_filename": "noto-fonts-OFL.txt",
+      "license_sha256": "0dab92d0544f7b233403f14b84a663bdbfa746982eda629e7f4f9ffe1b036feb"
+    }
+  }
+}

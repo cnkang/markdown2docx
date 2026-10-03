@@ -13,6 +13,7 @@ from docx import Document
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from markdown2docx import DocxTemplateManager, MarkdownToDocxConverter
+from markdown2docx.exceptions import TemplateError
 
 
 @pytest.fixture
@@ -193,13 +194,9 @@ def test_missing_template_handling(complex_markdown, caplog):
 
         # Use converter with non-existent template
         converter = MarkdownToDocxConverter(reference_doc=nonexistent_template)
-        result = converter.convert(input_path)
-
-        # Conversion should complete successfully
-        assert result.exists()
-
-        # Warning should be logged
-        assert "Reference document not found" in caplog.text
+        with pytest.raises(TemplateError, match="Reference document not found"):
+            converter.convert(input_path)
+        assert not input_path.with_suffix(".docx").exists()
 
 
 def test_multilingual_conversion():
@@ -277,8 +274,8 @@ def test_error_recovery():
         input_path = tmpdir_path / "test.md"
         input_path.write_text("# Test")
 
-        result = converter_with_template.convert(input_path)
-        assert result.exists()
+        with pytest.raises(TemplateError):
+            converter_with_template.convert(input_path)
 
 
 def test_large_document_conversion():

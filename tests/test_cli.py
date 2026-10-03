@@ -148,7 +148,7 @@ def test_cli_help():
 
     assert result.returncode == 0
     assert (
-        "Convert Markdown files to modern DOCX format with advanced features"
+        "Convert multilingual Markdown to Word with verified open fonts"
         in result.stdout
     )
     assert "Examples:" in result.stdout
@@ -181,7 +181,7 @@ class TestArgumentParser:
         parser = create_argument_parser()
         help_text = parser.format_help()
 
-        assert "Convert Markdown files to modern DOCX format" in help_text
+        assert "Convert multilingual Markdown to Word" in help_text
         assert "--template" in help_text
         assert "--toc" in help_text
         assert "--verbose" in help_text

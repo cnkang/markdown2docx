@@ -11,11 +11,15 @@ from .exceptions import (
     TemplateError,
     ValidationError,
 )
+from .fonts import FontError
+from .report import ConversionReport
 from .templates import DocxTemplateManager
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "MarkdownToDocxConverter",
+    "ConversionReport",
+    "FontError",
     "DocxTemplateManager",
     "MarkdownToDocxConfig",
     "DEFAULT_CONFIG",

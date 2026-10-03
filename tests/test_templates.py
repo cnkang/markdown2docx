@@ -52,12 +52,12 @@ def test_template_heading_styles():
 
         # Test heading style properties
         heading1 = doc.styles["Heading 1"]
-        assert heading1.font.name == "Calibri"
+        assert heading1.font.name == "Noto Sans"
         assert heading1.font.size.pt == 18
         assert heading1.font.bold is True
 
         heading2 = doc.styles["Heading 2"]
-        assert heading2.font.name == "Calibri"
+        assert heading2.font.name == "Noto Sans"
         assert heading2.font.size.pt == 14
         assert heading2.font.bold is True
 
@@ -72,7 +72,7 @@ def test_template_paragraph_styles():
 
         # Test normal style properties
         normal_style = doc.styles["Normal"]
-        assert normal_style.font.name == "Calibri"
+        assert normal_style.font.name == "Noto Sans"
         assert normal_style.font.size.pt == 11
 
 
@@ -150,7 +150,7 @@ def test_template_code_style():
         assert "Code Block" in style_names
 
         code_style = doc.styles["Code Block"]
-        assert code_style.font.name == "Consolas"
+        assert code_style.font.name == "Noto Sans Mono"
         assert code_style.font.size.pt == 9
 
 

@@ -23,7 +23,12 @@ class PandocConfig:
     """Minimum recommended Pandoc version."""
 
     reader_format: str = (
-        "gfm" "+footnotes" "+tex_math_dollars" "+fenced_divs" "+bracketed_spans"
+        "gfm"
+        "+footnotes"
+        "+tex_math_dollars"
+        "+fenced_divs"
+        "+bracketed_spans"
+        "+yaml_metadata_block"
     )
     """Default Markdown reader format with extensions."""
 
@@ -44,16 +49,16 @@ class TemplateConfig:
     margin_cm: float = 2.54
     """Default margin in centimeters (≈1 inch)."""
 
-    body_font: str = "Calibri"
+    body_font: str = "Noto Sans"
     """Default body text font."""
 
     body_size_pt: int = 11
     """Default body text size in points."""
 
-    heading_font: str = "Calibri"
+    heading_font: str = "Noto Sans"
     """Default heading font."""
 
-    code_font: str = "Consolas"
+    code_font: str = "Noto Sans Mono"
     """Default code block font."""
 
     code_size_pt: int = 9
@@ -95,6 +100,17 @@ class LoggingConfig:
 
 
 @dataclass
+class InternationalConfig:
+    """Document settings; API options and metadata take precedence."""
+
+    lang: str | None = None
+    direction: str = "auto"
+    offline: bool = False
+    allow_unverified_fonts: bool = False
+    font_cache: str | None = None
+
+
+@dataclass
 class MarkdownToDocxConfig:
     """Main configuration class for markdown2docx."""
 
@@ -102,6 +118,7 @@ class MarkdownToDocxConfig:
     template: TemplateConfig = field(default_factory=TemplateConfig)
     conversion: ConversionConfig = field(default_factory=ConversionConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    international: InternationalConfig = field(default_factory=InternationalConfig)
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> MarkdownToDocxConfig:
@@ -127,6 +144,9 @@ class MarkdownToDocxConfig:
                 template=template_config,
                 conversion=conversion_config,
                 logging=logging_config,
+                international=InternationalConfig(
+                    **config_dict.get("international", {})
+                ),
             )
         except TypeError as e:
             raise ConfigurationError(None, f"Invalid configuration format: {e}") from e
