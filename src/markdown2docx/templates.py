@@ -25,6 +25,7 @@ from docx.shared import Cm, Inches, Pt
 
 from .config import DEFAULT_CONFIG, TemplateConfig
 from .exceptions import TemplateError
+from .output import staged_docx_output
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -186,9 +187,6 @@ class DocxTemplateManager:
             output_path = Path(output_path)
             self._validate_output_path(output_path)
 
-            # Ensure output directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
             logger.info("Creating DOCX template: %s", output_path)
 
             # Create new document
@@ -206,7 +204,8 @@ class DocxTemplateManager:
             self._set_compatibility_mode_xml(doc, mode="16")
 
             # Save the document
-            doc.save(str(output_path))
+            with staged_docx_output(output_path) as staged_path:
+                doc.save(str(staged_path))
 
             logger.info("Successfully created template: %s", output_path)
             return output_path
@@ -222,7 +221,7 @@ class DocxTemplateManager:
             raise TemplateError(
                 str(output_path), "Output template file must use .docx extension"
             )
-        if output_path.exists() and output_path.is_symlink():
+        if output_path.is_symlink():
             raise TemplateError(
                 str(output_path), "Refusing to write template through symlink path"
             )
