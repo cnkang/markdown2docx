@@ -271,7 +271,7 @@ class MarkdownToDocxConverter:
             ast, resolver, lang=document_lang, base_direction=document_dir
         )
         document.code_size_pt = self.config.template.code_size_pt
-        annotated = document.annotate()
+        annotated = document.annotate(toc=toc)
         with tempfile.TemporaryDirectory(prefix="md2docx-convert-") as temporary:
             root = Path(temporary)
             ast_path = root / "input.json"
