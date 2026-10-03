@@ -1,62 +1,29 @@
-# Examples Documentation
+# Examples and acceptance artifacts
 
-This directory contains Markdown example files for testing and demonstrating the converter's functionality.
+[`multilingual.md`](multilingual.md) is the primary acceptance fixture. It combines Simplified/Traditional Chinese, Japanese, Korean, English, French, Spanish, Russian and Arabic within one document, paragraph and table cell. It exercises emphasis, links, regional glyphs, combining marks, nested/ordered/task lists, tables, quotations, RTL scopes, code, footnotes, a generated TOC, inline/display math and a local image.
 
-本目录包含用于测试和演示转换器功能的Markdown示例文件。
-
-## File List 文件列表
-
-- `example.md` - Comprehensive multilingual example showcasing all converter features (完整的多语言示例，展示所有转换器功能)
-
-## Usage 使用方法
-
-### Basic Conversion 基础转换
 ```bash
-# Convert with default settings (使用默认设置转换)
-uv run python -m src.markdown2docx.cli examples/example.md
-
-# Convert with custom output (指定输出文件)
-uv run python -m src.markdown2docx.cli examples/example.md -o my_output.docx
-
-# Convert with template (使用模板转换)
-uv run python -m src.markdown2docx.cli examples/example.md --template modern_template.docx
-
-# Convert with table of contents (包含目录)
-uv run python -m src.markdown2docx.cli examples/example.md --toc --toc-depth 3
+uv run python scripts/validate_multilingual.py --output-dir artifacts/multilingual
 ```
 
-### Create Template First 首先创建模板
-```bash
-# Create a modern template (创建现代模板)
-uv run python -m src.markdown2docx.cli --create-template modern_template.docx
+Outputs:
 
-# Then use it for conversion (然后用于转换)
-uv run python -m src.markdown2docx.cli examples/example.md --template modern_template.docx
+- `multilingual.docx`: the editable Word artifact.
+- `report.json`: language/font provenance and separate validation statuses.
+- `preview/preview.pdf` and `preview/page-*.png`: produced with `--render` when required fonts are installed and LibreOffice/Poppler are available.
+
+No template is needed. The first run downloads missing approved fonts to the application cache. Install reported fonts on machines used to view or render the DOCX. `--offline` reuses the verified cache.
+
+```bash
+uv run python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
 ```
 
-## Features Tested 测试的功能
+GitHub Actions retains per-platform `multilingual-<OS>` artifacts; Linux additionally renders pages and checks expected PDF fonts. Artifacts are available from the workflow run's summary. Rendering is evidence for inspection, not automatic approval of Arabic shaping or layout. Check the previews and open the DOCX in Word/LibreOffice before a release.
 
-The example file tests all converter capabilities:
+[`example.md`](example.md) remains a general Markdown example. Emoji in that legacy fixture are explicitly outside full font/display verification.
 
-示例文件测试所有转换器功能：
+综合样例可用于检查所有首批语言在同一个文件、同段落和同表格单元格中的混排。CI 上传 DOCX、报告和 Linux 页面预览；字体仅在缓存时需要另行安装，人工展示验收与自动结构检查分别记录。
 
-- **Text Formatting** - Bold, italic, strikethrough, superscript, subscript (文本格式)
-- **Lists** - Ordered, unordered, nested, task lists (列表)
-- **Code Blocks** - Syntax highlighting for multiple languages (代码块)
-- **Tables** - Complex layouts with alignment (表格)
-- **Multilingual Content** - International text, RTL languages (多语言内容)
-- **Links & References** - External links, footnotes (链接和引用)
-- **Special Characters** - Unicode symbols, mathematical notation (特殊字符)
+The TOC is a Word field: refresh it in Word/LibreOffice to populate entries. The headless PDF preview may show only the contents heading until fields are updated.
 
-## Expected Output 预期输出
-
-The converted DOCX file should properly handle:
-
-转换后的DOCX文件应该正确处理：
-
-- ✅ Heading styles mapping (# → Heading 1, ## → Heading 2, etc.) (标题样式映射)
-- ✅ Text formatting preservation (bold, italic, strikethrough) (文本格式保持)
-- ✅ Table and list rendering (表格和列表渲染)
-- ✅ Code syntax highlighting (代码语法高亮)
-- ✅ Multilingual character support and RTL text (多语言字符支持和RTL文本)
-- ✅ Modern DOCX standards compliance (现代DOCX标准兼容性)
+Committed Linux sample: [DOCX](output/multilingual.docx), [PDF](output/preview/preview.pdf), [report](output/report.json), [page 1](output/preview/page-1.png), [page 2](output/preview/page-2.png), [page 3](output/preview/page-3.png). The report records the generating commit/workflow, with machine-specific paths sanitized. Regenerate from the fixture after changing conversion behavior.
