@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 
-EXECUTION_REVISION = "4f7053913e568aae9b69e2ba17fc77dd4e11cbd5"
+EXECUTION_REVISION = "f0c33504d83b0dc983f56b7d0d2ab8ea89640687"
 SOURCE = f"git+https://github.com/cnkang/markdown2docx.git@{EXECUTION_REVISION}"
 
 
