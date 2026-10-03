@@ -40,3 +40,7 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+# Generated acceptance artifacts and local CI tools
+artifacts/
+.tools/
+coverage.xml

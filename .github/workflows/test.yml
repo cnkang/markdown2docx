@@ -9,28 +9,71 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    
-    - name: Install uv
-      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      with:
-        version: "0.8.22"
-        enable-cache: true
-    
-    - name: Set up Python
-      run: uv python install 3.14
-    
-    - name: Cache Pandoc
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ~/.local/bin/pandoc
-        key: pandoc-${{ runner.os }}-2.19
-    
-    - name: Set up environment
-      run: ./scripts/setup-env.sh --group dev
-    
-    - name: Run tests
-      run: uv run pytest --cov=src
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.22"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+      - name: Install pinned Pandoc
+        run: |
+          uv run python - <<'PY'
+          import os
+          from pathlib import Path
+          import pypandoc
+          target = Path('.tools').absolute()
+          target.mkdir(exist_ok=True)
+          pypandoc.download_pandoc(version='3.12', targetfolder=str(target), delete_installer=True)
+          binary = target / ('pandoc.exe' if os.name == 'nt' else 'pandoc')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              env.write(f'PYPANDOC_PANDOC={binary}\n')
+          PY
+      - name: Check source formatting and types
+        run: |
+          uv run black --check src scripts/validate_multilingual.py tests/test_fonts.py tests/test_multilingual.py
+          uv run isort --check-only src scripts/validate_multilingual.py tests/test_fonts.py tests/test_multilingual.py
+          uv run mypy src/markdown2docx
+      - name: Run regression and mixed-language tests
+        run: uv run pytest --cov=src --cov-report=xml
+      - name: Validate the comprehensive Markdown fixture
+        run: uv run python scripts/validate_multilingual.py --output-dir artifacts/multilingual
+      - name: Install rendering dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libreoffice-writer poppler-utils fontconfig
+      - name: Install verified fixture fonts in the disposable Linux runner
+        if: runner.os == 'Linux'
+        run: |
+          uv run python - <<'PY'
+          import json, shutil
+          from pathlib import Path
+          report = json.loads(Path('artifacts/multilingual/report.json').read_text())
+          destination = Path.home() / '.local/share/fonts/markdown2docx'
+          destination.mkdir(parents=True, exist_ok=True)
+          for font in report['fonts']:
+              assert font['verified'], font
+              shutil.copy2(font['path'], destination / Path(font['path']).name)
+          PY
+          fc-cache -f
+      - name: Render and verify expected PDF fonts
+        if: runner.os == 'Linux'
+        run: uv run python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
+      - name: Upload DOCX, report and Linux page previews
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: multilingual-${{ runner.os }}
+          path: |
+            artifacts/
+            coverage.xml
+          if-no-files-found: warn
