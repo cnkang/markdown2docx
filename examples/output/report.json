@@ -1,0 +1,176 @@
+{
+  "status": "success",
+  "output_path": "examples/output/multilingual.docx",
+  "language": "en",
+  "languages": [
+    "ar",
+    "en",
+    "es",
+    "fr",
+    "ja",
+    "ko",
+    "ru",
+    "zh-Hans",
+    "zh-Hant"
+  ],
+  "scripts": [
+    "Arabic",
+    "Cyrillic",
+    "Han",
+    "Hangul",
+    "Hiragana",
+    "Latin"
+  ],
+  "fonts": [
+    {
+      "key": "sans",
+      "family": "Noto Sans",
+      "path": "<installed-fonts>/NotoSans-Regular.ttf",
+      "source": "system",
+      "sha256": "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "cjk-sc",
+      "family": "Noto Sans CJK SC",
+      "path": "<installed-fonts>/NotoSansCJKsc-Regular.otf",
+      "source": "system",
+      "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "cjk-tc",
+      "family": "Noto Sans CJK TC",
+      "path": "<installed-fonts>/NotoSansCJKtc-Regular.otf",
+      "source": "system",
+      "sha256": "dce08bd4fd91aa8aa76ed8fea4b694c2dfb8550f67871e326843212ddbeb88b4",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "cjk-jp",
+      "family": "Noto Sans CJK JP",
+      "path": "<installed-fonts>/NotoSansCJKjp-Regular.otf",
+      "source": "system",
+      "sha256": "68a3fc98800b2a27b371f2fb79991daf3633bd89309d4ffaa6946fd587f375b5",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "cjk-kr",
+      "family": "Noto Sans CJK KR",
+      "path": "<installed-fonts>/NotoSansCJKkr-Regular.otf",
+      "source": "system",
+      "sha256": "6bcb2a0703aa137e874fc2dffa85f6c21ba9a67fa329e81b8c801663af7e992a",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "f8d157532fbfaeda587e826d4cd5b21a49186f7c",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "arabic",
+      "family": "Noto Sans Arabic",
+      "path": "<installed-fonts>/NotoSansArabic-Regular.ttf",
+      "source": "system",
+      "sha256": "ceea25b464a656dc3b26849bab9356740401af62aedf1bfa8b7f0d9b75925b1b",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "mono",
+      "family": "Noto Sans Mono",
+      "path": "<installed-fonts>/NotoSansMono-Regular.ttf",
+      "source": "system",
+      "sha256": "d9e2b23d19f8230be7146f409a52b1d23117e635e28f2e2892cf91b7382f325b",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "symbols",
+      "family": "Noto Sans Symbols2",
+      "path": "<installed-fonts>/NotoSansSymbols2-Regular.ttf",
+      "source": "system",
+      "sha256": "882d142b9a1ef3fd7fa4225dbe95c10fab6664206eb4964c8ff705a4f6d02988",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    },
+    {
+      "key": "math",
+      "family": "Noto Sans Math",
+      "path": "<installed-fonts>/NotoSansMath-Regular.ttf",
+      "source": "system",
+      "sha256": "ff5e5e7638e05bf7bc159d8801a28a40eddf76c155bec4fee53150babd795e1a",
+      "license": "OFL-1.1",
+      "verified": true,
+      "version": "ffebf8c1ee449e544955a7e813c54f9b73848eac",
+      "license_url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+      "weight": 400,
+      "style": "Regular"
+    }
+  ],
+  "warnings": [
+    {
+      "code": "CJK_LANGUAGE_AMBIGUOUS",
+      "message": "Unmarked shared Han characters use Simplified Chinese glyphs; add lang spans for regional forms"
+    }
+  ],
+  "checks": {
+    "text_integrity": "passed",
+    "font_coverage": "passed",
+    "language_direction": "passed",
+    "structure": "passed",
+    "rendering": "rendered",
+    "rendered_fonts": "passed",
+    "visual_review": "required"
+  },
+  "preview": {
+    "status": "rendered",
+    "pdf": "examples/output/preview/preview.pdf",
+    "pages": [
+      "examples/output/preview/page-1.png",
+      "examples/output/preview/page-2.png",
+      "examples/output/preview/page-3.png"
+    ],
+    "visual_review": "required"
+  },
+  "example_provenance": {
+    "workflow_run": "https://github.com/cnkang/markdown2docx/actions/runs/37122285794",
+    "revision": "4f7053913e568aae9b69e2ba17fc77dd4e11cbd5",
+    "renderer": "LibreOffice on Linux",
+    "paths": "sanitized for distribution",
+    "visual_review": "release review in Word and LibreOffice still required",
+    "toc": "refresh the TOC field in the viewing application"
+  }
+}
