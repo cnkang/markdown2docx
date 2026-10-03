@@ -311,3 +311,116 @@ def test_text_symbols_and_plain_digits_are_not_emoji(tmp_path):
     report = MarkdownToDocxConverter().convert_with_report(source)
     assert report.checks["font_coverage"] == "passed"
     assert not any(item["code"] == "EMOJI_UNVERIFIED" for item in report.warnings)
+
+
+def test_character_style_survives_nested_font_markers(tmp_path):
+    from docx import Document
+    from docx.enum.style import WD_STYLE_TYPE
+
+    from markdown2docx.templates import DocxTemplateManager
+
+    reference = DocxTemplateManager.create_reference(
+        tmp_path / "reference.docx", MarkdownToDocxConfig().template
+    )
+    template = Document(reference)
+    emphasis = template.styles.add_style("Emphasis", WD_STYLE_TYPE.CHARACTER)
+    emphasis.font.italic = True
+    brand = template.styles.add_style("Brand Accent", WD_STYLE_TYPE.CHARACTER)
+    brand.font.bold = True
+    template.save(reference)
+    source = tmp_path / "styles.md"
+    source.write_text(
+        '[outer [inside]{custom-style="Emphasis"} 中文]{custom-style="Brand Accent"} '
+        '[[linked](https://example.com)]{custom-style="Emphasis"} outside\n',
+        encoding="utf-8",
+    )
+    result = MarkdownToDocxConverter(reference_doc=reference).convert(source)
+    roots = parts(result)
+    document = roots["word/document.xml"]
+    styles = roots["word/styles.xml"]
+    style_ids = {
+        style.find(W + "name").get(W + "val"): style.get(W + "styleId")
+        for style in styles.findall(W + "style")
+    }
+    for text, name in [
+        ("outer", "Brand Accent"),
+        ("中文", "Brand Accent"),
+        ("inside", "Emphasis"),
+        ("linked", "Emphasis"),
+    ]:
+        run = next(
+            run
+            for run in document.iter(W + "r")
+            if text in "".join(run.xpath("./w:t/text()", namespaces=NS))
+        )
+        assert run.find(W + "rPr/" + W + "rStyle").get(W + "val") == style_ids[name]
+    outside = next(
+        run
+        for run in document.iter(W + "r")
+        if "outside" in "".join(run.xpath("./w:t/text()", namespaces=NS))
+    )
+    assert outside.find(W + "rPr/" + W + "rStyle") is None
+    assert styles.xpath("//w:style[@w:styleId='Emphasis']/w:rPr/w:i", namespaces=NS)
+    assert styles.xpath(
+        "//w:style[w:name[@w:val='Brand Accent']]/w:rPr/w:b", namespaces=NS
+    )
+
+
+@pytest.mark.parametrize("identifier", ["example", "_example", "foo-bar"])
+def test_code_block_keeps_link_target_and_local_language(tmp_path, identifier):
+    source = tmp_path / "anchor.md"
+    source.write_text(
+        f"[Go](#{identifier})\n\n::: {{lang=ja}}\n\n```{{#{identifier} .text}}\n漢字\n```\n\n:::\n",
+        encoding="utf-8",
+    )
+    config = MarkdownToDocxConfig()
+    config.pandoc.reader_format = "markdown"
+    root = parts(MarkdownToDocxConverter(config=config).convert(source))[
+        "word/document.xml"
+    ]
+    target = root.xpath("//w:hyperlink/@w:anchor", namespaces=NS)
+    bookmarks = root.xpath("//w:bookmarkStart/@w:name", namespaces=NS)
+    assert target and target[0] in bookmarks
+    code_run = next(
+        run
+        for run in root.iter(W + "r")
+        if "漢字" in "".join(run.xpath("./w:t/text()", namespaces=NS))
+    )
+    assert code_run.find(W + "rPr/" + W + "lang").get(W + "val") == "ja"
+    assert (
+        code_run.find(W + "rPr/" + W + "rFonts").get(W + "eastAsia")
+        == "Noto Sans CJK JP"
+    )
+
+
+def test_no_toc_needs_no_localized_title_font_offline(tmp_path, monkeypatch):
+    import shutil
+
+    from markdown2docx.fonts import FontError
+
+    cache = tmp_path / "fonts"
+    cache.mkdir()
+    prepared = FontResolver(directories=[])
+    for key in ["sans", "symbols"]:
+        font = prepared.resolve(key)
+        entry = prepared.manifest["fonts"][key]
+        shutil.copyfile(font.path, cache / entry["filename"])
+        shutil.copyfile(
+            prepared.cache / entry["license_filename"],
+            cache / entry["license_filename"],
+        )
+    resolver = FontResolver(cache=cache, offline=True, directories=[])
+    monkeypatch.setattr(
+        "markdown2docx.converter.FontResolver", lambda **kwargs: resolver
+    )
+    source = tmp_path / "english.md"
+    source.write_text("English only", encoding="utf-8")
+    converter = MarkdownToDocxConverter()
+    report = converter.convert_with_report(
+        source, lang="zh-Hans", toc=False, offline=True
+    )
+    assert report.checks["font_coverage"] == "passed"
+    assert not any(font["key"].startswith("cjk") for font in report.fonts)
+    with pytest.raises(FontError) as error:
+        converter.convert(source, lang="zh-Hans", toc=True, offline=True)
+    assert error.value.code == "FONT_UNAVAILABLE"

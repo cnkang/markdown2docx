@@ -7,6 +7,7 @@ They are removed after their properties have been written directly to runs.
 from __future__ import annotations
 
 import copy
+import hashlib
 import unicodedata
 import zipfile
 from dataclasses import dataclass
@@ -182,6 +183,7 @@ class RunContext:
     paragraph_direction: str
     script: str
     code: bool = False
+    character_style: str | None = None
 
 
 class MultilingualDocument:
@@ -208,6 +210,7 @@ class MultilingualDocument:
         self.math = False
         self.code_size_pt = 9
         self._role = "body"
+        self._character_style: str | None = None
         self._warned: set[str] = set()
 
     def warn(self, code: str, message: str) -> None:
@@ -223,7 +226,7 @@ class MultilingualDocument:
             )
         return strip_emoji(text)
 
-    def annotate(self) -> dict[str, Any]:
+    def annotate(self, *, toc: bool = False) -> dict[str, Any]:
         self.ast["blocks"] = self._walk(
             self.ast["blocks"], self.lang, self.base_direction, "", "ltr"
         )
@@ -241,6 +244,8 @@ class MultilingualDocument:
             self.ast["meta"]["dir"] = {"t": "MetaString", "c": self.base_direction}
         else:
             self.ast["meta"].pop("dir", None)
+        if not toc:
+            return self.ast
         title_key = self.lang or "en"
         if title_key.startswith("zh"):
             title_key = (
@@ -293,7 +298,14 @@ class MultilingualDocument:
                 )
             marker = f"MD2D{len(self.runs):06d}"
             self.runs[marker] = RunContext(
-                part, key, lang, rtl and local_dir != "ltr", pdir, name, code
+                part,
+                key,
+                lang,
+                rtl and local_dir != "ltr",
+                pdir,
+                name,
+                code,
+                self._character_style,
             )
             # VerbatimChar overrides custom-style in Pandoc. Carry inline code as
             # text in our own style, then apply its size/font explicitly.
@@ -342,9 +354,15 @@ class MultilingualDocument:
                     inherited_dir = attrs["dir"]
                 else:
                     local_dir = attrs["dir"]
-            node["c"][1] = self._walk(
-                content[1], lang, inherited_dir, context, pdir, local_dir
-            )
+            previous_style = self._character_style
+            if kind == "Span" and "custom-style" in attrs:
+                self._character_style = attrs["custom-style"]
+            try:
+                node["c"][1] = self._walk(
+                    content[1], lang, inherited_dir, context, pdir, local_dir
+                )
+            finally:
+                self._character_style = previous_style
             return node
         if kind in {"Para", "Plain", "Header", "MetaInlines"}:
             context = text_of(node)
@@ -382,7 +400,8 @@ class MultilingualDocument:
                 self.resolver.resolve(key, self._checked_text(part))
                 self.scripts.add(name)
             # A code block's own attributes survive syntax highlighting via its ID.
-            content[0][0] = f"MD2DCODE{len(self.code_blocks)-1}"
+            if not content[0][0]:
+                content[0][0] = f"MD2DCODE{len(self.code_blocks)-1}"
             self.code_languages[content[0][0]] = lang
             return node
         if kind == "Math":
@@ -416,6 +435,23 @@ class MultilingualDocument:
             ]
         updated = []
         parser = etree.XMLParser(resolve_entities=False, no_network=True)
+        character_styles = {}
+        for info, data in entries:
+            if info.filename == "word/styles.xml":
+                styles = etree.fromstring(data, parser)
+                for style in styles.findall(W + "style"):
+                    name = style.find(W + "name")
+                    if style.get(W + "type") == "character" and name is not None:
+                        character_styles[name.get(W + "val")] = style.get(W + "styleId")
+        # Pandoc prefixes bookmark names with '_' and hashes names that Word
+        # cannot use directly. These aliases preserve language for user IDs too.
+        bookmark_languages = {
+            hashlib.sha1(identifier.encode("utf-8"), usedforsecurity=False).hexdigest()[
+                1:
+            ]: lang
+            for identifier, lang in self.code_languages.items()
+        }
+        bookmark_languages.update(self.code_languages)
         for info, data in entries:
             if info.filename.startswith("word/") and info.filename.endswith(".xml"):
                 root = etree.fromstring(data, parser)
@@ -443,8 +479,9 @@ class MultilingualDocument:
                         and previous is not None
                         and previous.tag == W + "bookmarkStart"
                     ):
-                        code_lang = self.code_languages.get(
-                            previous.get(W + "name", "").lstrip("_"), self.lang
+                        bookmark = previous.get(W + "name", "")
+                        code_lang = bookmark_languages.get(
+                            bookmark.removeprefix("_"), self.lang
                         )
                     marked_paragraph = False
                     for run in list(paragraph.iter(W + "r")):
@@ -457,7 +494,17 @@ class MultilingualDocument:
                             observed[marker] = observed.get(marker, "") + "".join(
                                 run.xpath("./w:t/text()", namespaces=NS)
                             )
-                            if any(
+                            if spec.character_style:
+                                style_id = character_styles.get(spec.character_style)
+                                if not style_id:
+                                    raise ValidationError(
+                                        str(path),
+                                        [
+                                            f"Character style missing: {spec.character_style}"
+                                        ],
+                                    )
+                                run_style.set(W + "val", style_id)
+                            elif any(
                                 parent.tag == W + "hyperlink"
                                 for parent in run.iterancestors()
                             ):
