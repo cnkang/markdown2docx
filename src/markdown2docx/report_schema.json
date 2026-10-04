@@ -115,6 +115,26 @@
       "type": "object",
       "required": [
         "status",
+        "kind",
+        "output_path"
+      ],
+      "properties": {
+        "status": {
+          "const": "success"
+        },
+        "kind": {
+          "const": "template"
+        },
+        "output_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "status",
         "error"
       ],
       "properties": {

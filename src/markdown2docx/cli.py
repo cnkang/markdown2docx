@@ -437,7 +437,11 @@ def main() -> None:
             if args.json:
                 print(
                     json.dumps(
-                        {"status": "success", "output_path": str(path)},
+                        {
+                            "status": "success",
+                            "kind": "template",
+                            "output_path": str(path),
+                        },
                         ensure_ascii=False,
                     )
                 )

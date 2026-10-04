@@ -388,3 +388,32 @@ def test_reference_removes_lowercase_complex_script_theme(tmp_path):
         for fonts in styles.xpath("//w:rFonts", namespaces=NS)
         for name in fonts.attrib
     )
+
+
+def test_template_cli_json_validates_published_schema(tmp_path):
+    output = tmp_path / "template.docx"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "markdown2docx.cli",
+            "--create-template",
+            str(output),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    report = json.loads(result.stdout)
+    schema = json.loads(
+        files("markdown2docx").joinpath("report_schema.json").read_text()
+    )
+    validate(report, schema)
+    assert report == {
+        "status": "success",
+        "kind": "template",
+        "output_path": str(output),
+    }
+    assert output.is_file()
