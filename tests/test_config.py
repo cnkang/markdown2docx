@@ -146,7 +146,6 @@ class TestMarkdownToDocxConfigFromEnv:
             "MD2DOCX_CONVERSION__DEFAULT_TOC_DEPTH": "2",
             "MD2DOCX_LOGGING__LEVEL": "WARNING",
             "OTHER_VAR": "should_be_ignored",
-            "MD2DOCX_INVALID": "top_level_var",
         }
 
         with patch.dict(os.environ, env_vars, clear=True):
@@ -224,7 +223,8 @@ class TestMarkdownToDocxConfigFromDict:
         with pytest.raises(ConfigurationError) as exc_info:
             MarkdownToDocxConfig.from_dict(invalid_dict)
 
-        assert "Invalid configuration format" in str(exc_info.value)
+        assert "Expected a mapping" in str(exc_info.value)
+        assert exc_info.value.config_key == "pandoc"
 
 
 class TestGetPandocArgs:
@@ -278,8 +278,8 @@ class TestLoadConfig:
     def test_load_config_nonexistent_file(self):
         """Test loading config with nonexistent file path."""
         nonexistent_path = Path("/nonexistent/config.yaml")
-        config = load_config(nonexistent_path)
-        assert isinstance(config, MarkdownToDocxConfig)
+        with pytest.raises(ConfigurationError, match="Unable to read config file"):
+            load_config(nonexistent_path)
 
     def test_load_config_existing_file(self):
         """Test loading config from TOML file and env override precedence."""

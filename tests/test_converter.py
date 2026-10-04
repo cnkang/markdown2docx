@@ -3,15 +3,12 @@
 包含基本转换功能测试和扩展功能测试。
 """
 
-import sys
 import tempfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from markdown2docx.config import MarkdownToDocxConfig
 from markdown2docx.converter import MarkdownToDocxConverter
@@ -86,6 +83,7 @@ def converter():
 # ============================================================================
 # Basic Conversion Tests
 # ============================================================================
+
 
 def test_convert_basic(converter, sample_markdown):
     """Test basic conversion functionality (测试基本转换功能)."""
@@ -224,6 +222,7 @@ def test_convert_with_template_method(converter, sample_markdown):
 # Converter Initialization Tests
 # ============================================================================
 
+
 class TestConverterInitialization:
     """Test converter initialization and validation."""
 
@@ -231,7 +230,8 @@ class TestConverterInitialization:
         """Test converter initialization with custom config."""
         config = MarkdownToDocxConfig()
         converter = MarkdownToDocxConverter(config=config)
-        assert converter.config is config
+        assert converter.config == config
+        assert converter.config is not config
 
     def test_init_with_reference_doc(self):
         """Test converter initialization with reference document."""
@@ -251,8 +251,11 @@ class TestConverterInitialization:
             ref_path = Path(tmp.name)
             tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             try:
-                converter = MarkdownToDocxConverter(reference_doc=ref_path, config=config)
-                assert converter.config is config
+                converter = MarkdownToDocxConverter(
+                    reference_doc=ref_path, config=config
+                )
+                assert converter.config == config
+                assert converter.config is not config
                 assert converter.reference_doc == ref_path
             finally:
                 ref_path.unlink()
@@ -262,6 +265,7 @@ class TestConverterInitialization:
 # Pandoc Validation Tests
 # ============================================================================
 
+
 class TestPandocValidation:
     """Test Pandoc installation validation."""
 
@@ -269,7 +273,7 @@ class TestPandocValidation:
     def test_validate_pandoc_success(self, mock_get_version):
         """Test successful Pandoc validation."""
         mock_get_version.return_value = "2.19.2"
-        
+
         converter = MarkdownToDocxConverter()
         # Should not raise any exception
         converter._validate_pandoc()
@@ -278,7 +282,7 @@ class TestPandocValidation:
     def test_validate_pandoc_not_found(self, mock_get_version):
         """Test Pandoc not found error."""
         mock_get_version.side_effect = OSError("Pandoc not found")
-        
+
         with pytest.raises(PandocNotFoundError):
             MarkdownToDocxConverter()
 
@@ -286,10 +290,10 @@ class TestPandocValidation:
     def test_validate_pandoc_other_error(self, mock_get_version):
         """Test other Pandoc validation errors."""
         mock_get_version.side_effect = RuntimeError("Unexpected error")
-        
+
         with pytest.raises(PandocError) as exc_info:
             MarkdownToDocxConverter()
-        
+
         assert "Failed to validate Pandoc installation" in str(exc_info.value)
 
     @patch("markdown2docx.converter.pypandoc.get_pandoc_version")
@@ -297,7 +301,7 @@ class TestPandocValidation:
     def test_validate_pandoc_no_packaging(self, mock_get_version):
         """Test Pandoc validation without packaging library."""
         mock_get_version.return_value = "2.19.2"
-        
+
         converter = MarkdownToDocxConverter()
         # Should not raise exception, just log info
         converter._validate_pandoc()
@@ -306,7 +310,7 @@ class TestPandocValidation:
     def test_validate_pandoc_version_warning(self, mock_get_version):
         """Test Pandoc version warning for older versions."""
         mock_get_version.return_value = "2.18.0"  # Older than minimum
-        
+
         converter = MarkdownToDocxConverter()
         with patch("markdown2docx.converter.logger") as mock_logger:
             converter._validate_pandoc()
@@ -318,6 +322,7 @@ class TestPandocValidation:
 # Pandoc Arguments Tests
 # ============================================================================
 
+
 class TestPandocArgsGeneration:
     """Test Pandoc arguments generation."""
 
@@ -325,7 +330,7 @@ class TestPandocArgsGeneration:
         """Test basic Pandoc arguments building."""
         converter = MarkdownToDocxConverter()
         args = converter._build_pandoc_args(toc=False, toc_depth=3, extra_args=None)
-        
+
         assert isinstance(args, list)
         assert all(isinstance(arg, str) for arg in args)
 
@@ -333,14 +338,14 @@ class TestPandocArgsGeneration:
         """Test Pandoc arguments with table of contents."""
         converter = MarkdownToDocxConverter()
         args = converter._build_pandoc_args(toc=True, toc_depth=3, extra_args=None)
-        
+
         assert "--toc" in args
 
     def test_build_pandoc_args_with_toc_depth(self):
         """Test Pandoc arguments with TOC depth."""
         converter = MarkdownToDocxConverter()
         args = converter._build_pandoc_args(toc=True, toc_depth=4, extra_args=None)
-        
+
         assert "--toc" in args
         # TOC depth is passed as separate arguments
         toc_depth_idx = args.index("--toc-depth")
@@ -353,8 +358,10 @@ class TestPandocArgsGeneration:
             tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             try:
                 converter = MarkdownToDocxConverter(reference_doc=ref_path)
-                args = converter._build_pandoc_args(toc=False, toc_depth=3, extra_args=None)
-                
+                args = converter._build_pandoc_args(
+                    toc=False, toc_depth=3, extra_args=None
+                )
+
                 # Reference doc is passed as separate arguments
                 ref_doc_idx = args.index("--reference-doc")
                 assert args[ref_doc_idx + 1] == str(ref_path)
@@ -365,8 +372,10 @@ class TestPandocArgsGeneration:
         """Test Pandoc arguments with extra arguments."""
         converter = MarkdownToDocxConverter()
         extra_args = ["--highlight-style=tango", "--number-sections"]
-        args = converter._build_pandoc_args(toc=False, toc_depth=3, extra_args=extra_args)
-        
+        args = converter._build_pandoc_args(
+            toc=False, toc_depth=3, extra_args=extra_args
+        )
+
         for extra_arg in extra_args:
             assert extra_arg in args
 
@@ -374,6 +383,7 @@ class TestPandocArgsGeneration:
 # ============================================================================
 # DOCX Validation Tests
 # ============================================================================
+
 
 class TestDocxValidation:
     """Test DOCX file validation."""
@@ -385,32 +395,32 @@ class TestDocxValidation:
             from docx import Document
         except ImportError:
             pytest.skip("python-docx not available for creating test DOCX file")
-        
+
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             output_path = Path(tmp.name)
             tmp.close()  # Release the handle before Windows reads/deletes this fixture.
-            
+
             try:
                 # Create a minimal valid DOCX document
                 doc = Document()
                 doc.add_paragraph("Test content")
                 doc.save(str(output_path))
-                
+
                 converter = MarkdownToDocxConverter()
                 # Should not raise any exception
                 converter._validate_docx_output(output_path)
-                
+
             finally:
                 output_path.unlink()
 
     def test_validate_docx_missing_file(self):
         """Test DOCX validation with missing file."""
         nonexistent_path = Path("/nonexistent/file.docx")
-        
+
         converter = MarkdownToDocxConverter()
         with pytest.raises(ValidationError) as exc_info:
             converter._validate_docx_output(nonexistent_path)
-        
+
         assert "Output file was not created" in str(exc_info.value)
 
     def test_validate_docx_empty_file(self):
@@ -419,11 +429,11 @@ class TestDocxValidation:
             output_path = Path(tmp.name)
             tmp.close()  # Release the handle before Windows reads/deletes this fixture.
             # File is empty by default
-            
+
             converter = MarkdownToDocxConverter()
             with pytest.raises(ValidationError) as exc_info:
                 converter._validate_docx_output(output_path)
-            
+
             assert "Output file is empty" in str(exc_info.value)
             output_path.unlink()
 
@@ -432,25 +442,26 @@ class TestDocxValidation:
 # Conversion Error Tests
 # ============================================================================
 
+
 class TestConversionErrors:
     """Test conversion error handling."""
 
-    @patch("markdown2docx.converter.pypandoc.convert_file")
+    @patch("markdown2docx.converter.write_docx")
     def test_convert_pypandoc_error(self, mock_convert):
         """Test handling of pypandoc conversion errors."""
         mock_convert.side_effect = RuntimeError("Pandoc conversion failed")
-        
+
         with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as tmp:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = Path(tmp.name)
             tmp.close()  # Release the handle before Windows reads/deletes this fixture.
-            
+
             try:
                 converter = MarkdownToDocxConverter()
                 with pytest.raises(ConversionError) as exc_info:
                     converter.convert(input_path)
-                
+
                 assert "Pandoc conversion failed" in str(exc_info.value)
                 assert str(input_path) in str(exc_info.value)
             finally:
@@ -459,23 +470,23 @@ class TestConversionErrors:
     def test_convert_nonexistent_input(self):
         """Test conversion with nonexistent input file."""
         nonexistent_path = Path("/nonexistent/input.md")
-        
+
         converter = MarkdownToDocxConverter()
         with pytest.raises(FileNotFoundError):
             converter.convert(nonexistent_path)
 
-    @patch("markdown2docx.converter.pypandoc.convert_file")
+    @patch("markdown2docx.converter.write_docx")
     def test_convert_with_validation_failure(self, mock_convert):
         """Test conversion with validation failure."""
         # Mock successful conversion but create empty output file
         mock_convert.return_value = None
-        
+
         with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as tmp:
             tmp.write("# Test\nContent")
             tmp.flush()
             input_path = Path(tmp.name)
             tmp.close()  # Release the handle before Windows reads/deletes this fixture.
-            
+
             try:
                 converter = MarkdownToDocxConverter()
                 with pytest.raises(ValidationError):
@@ -488,6 +499,7 @@ class TestConversionErrors:
 # Template Conversion Tests
 # ============================================================================
 
+
 class TestConvertWithTemplate:
     """Test template-based conversion."""
 
@@ -498,7 +510,10 @@ class TestConvertWithTemplate:
         DocxTemplateManager.create_modern_template(template)
         result = MarkdownToDocxConverter().convert_with_template(source, template)
         from docx import Document
-        assert "This is a test." in "\n".join(p.text for p in Document(result).paragraphs)
+
+        assert "This is a test." in "\n".join(
+            p.text for p in Document(result).paragraphs
+        )
 
     def test_convert_with_template_nonexistent_template(self):
         """Test template conversion with nonexistent template."""
@@ -507,9 +522,9 @@ class TestConvertWithTemplate:
             tmp.flush()
             input_path = Path(tmp.name)
             tmp.close()  # Release the handle before Windows reads/deletes this fixture.
-            
+
             nonexistent_template = Path("/nonexistent/template.docx")
-            
+
             try:
                 converter = MarkdownToDocxConverter()
                 with pytest.raises(FileNotFoundError):
@@ -522,18 +537,25 @@ class TestConvertWithTemplate:
 # Integration Tests
 # ============================================================================
 
+
 class TestConverterIntegration:
     """Test converter integration scenarios."""
 
     def test_converter_with_all_options(self, tmp_path):
-        import pypandoc
         source = tmp_path / "input.md"
         source.write_text("# Test Document\n\n## Section\nContent here.")
         reference = tmp_path / "reference.docx"
         DocxTemplateManager.create_modern_template(reference)
         converter = MarkdownToDocxConverter(reference_doc=reference)
-        with patch("markdown2docx.converter.pypandoc.convert_file", wraps=pypandoc.convert_file) as writer:
-            result = converter.convert(source, toc=True, toc_depth=2, extra_args=["--number-sections"])
+        with patch(
+            "markdown2docx.converter.write_docx",
+            wraps=__import__(
+                "markdown2docx.runner", fromlist=["write_docx"]
+            ).write_docx,
+        ) as writer:
+            result = converter.convert(
+                source, toc=True, toc_depth=2, extra_args=["--number-sections"]
+            )
         assert result.exists()
         args = writer.call_args.kwargs["extra_args"]
         assert "--toc" in args and "--number-sections" in args
@@ -543,9 +565,9 @@ class TestConverterIntegration:
     def test_converter_initialization_with_validation(self, mock_get_version):
         """Test converter initialization triggers Pandoc validation."""
         mock_get_version.return_value = "2.19.2"
-        
+
         # Creating converter should trigger validation
-        converter = MarkdownToDocxConverter()
+        MarkdownToDocxConverter()
         mock_get_version.assert_called_once()
 
     def test_output_path_generation(self, tmp_path):

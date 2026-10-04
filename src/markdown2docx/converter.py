@@ -7,13 +7,17 @@ type safety, and configuration management.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
-import subprocess
+
+# controlled argv, shell=False
+import subprocess  # nosec B404
 import tempfile
 import zipfile
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Optional, Sequence, Union
 
 import pypandoc
@@ -26,7 +30,8 @@ except ImportError:
     Version = None  # type: ignore[assignment,misc]
     VERSION_AVAILABLE = False
 
-from .config import DEFAULT_CONFIG, MarkdownToDocxConfig
+from .archive import validate_archive
+from .config import MarkdownToDocxConfig
 from .exceptions import (
     ConversionError,
     PandocError,
@@ -37,6 +42,12 @@ from .fonts import FontResolver
 from .multilingual import MultilingualDocument, text_of
 from .output import staged_docx_output
 from .report import ConversionReport, render_preview
+from .resources import (
+    stage_local_resources,
+    validate_resources,
+    validate_restricted_arguments,
+)
+from .runner import run_pandoc, write_docx
 from .templates import DocxTemplateManager
 
 # Configure logger
@@ -79,8 +90,13 @@ class MarkdownToDocxConverter:
             PandocNotFoundError: If Pandoc is not installed or not found.
             PandocError: If Pandoc version check fails.
         """
-        self.config = config or DEFAULT_CONFIG
+        self.config = (
+            copy.deepcopy(config) if config is not None else MarkdownToDocxConfig()
+        )
+        self.config.validate()
         self.reference_doc = Path(reference_doc) if reference_doc else None
+
+        self.pandoc_version = ""
 
         # Validate Pandoc installation and version
         self._validate_pandoc()
@@ -90,14 +106,7 @@ class MarkdownToDocxConverter:
 
     def _setup_logging(self) -> None:
         """Configure logging based on configuration settings."""
-        log_level = getattr(logging, self.config.logging.level.upper(), logging.INFO)
-        logger.setLevel(log_level)
-
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(self.config.logging.format)
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
+        # Logging belongs to the embedding application or CLI.
 
     def _validate_pandoc(self) -> None:
         """Validate Pandoc installation and version.
@@ -108,6 +117,7 @@ class MarkdownToDocxConverter:
         """
         try:
             version_str = str(pypandoc.get_pandoc_version())
+            self.pandoc_version = version_str
             logger.info("Pandoc version %s detected", version_str)
 
             if VERSION_AVAILABLE and Version is not None:
@@ -157,6 +167,8 @@ class MarkdownToDocxConverter:
         direction: str | None = None,
         offline: bool | None = None,
         allow_unverified_fonts: bool | None = None,
+        resources_offline: bool | None = None,
+        restricted: bool | None = None,
         render: bool = False,
         preview_dir: str | Path | None = None,
     ) -> ConversionReport:
@@ -167,12 +179,19 @@ class MarkdownToDocxConverter:
         Structural and text-integrity checks always run; validate_output is retained
         for API compatibility and cannot disable the required publication checks.
         """
+        self.config.validate()
+        started = perf_counter()
+        timings: dict[str, float] = {}
         input_path = Path(input_path)
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
         if not input_path.is_file():
             raise ConversionError(
                 str(input_path), "Input path must be a file, not a directory"
+            )
+        if input_path.stat().st_size > self.config.limits.input_bytes:
+            raise ConversionError(
+                str(input_path), "Markdown exceeds limits.input_bytes"
             )
         output_path = (
             Path(output_path) if output_path else input_path.with_suffix(".docx")
@@ -187,6 +206,23 @@ class MarkdownToDocxConverter:
                 str(input_path),
                 f"Table of contents depth must be between 1 and 6, got {toc_depth}",
             )
+        restricted_mode = (
+            self.config.international.restricted if restricted is None else restricted
+        )
+        resource_offline = (
+            self.config.international.resources_offline
+            if resources_offline is None
+            else resources_offline
+        )
+        if restricted_mode:
+            if (
+                self.config.pandoc.reader_format
+                != MarkdownToDocxConfig().pandoc.reader_format
+            ):
+                raise ConversionError(
+                    str(input_path), "Restricted mode requires the default GFM reader"
+                )
+            validate_restricted_arguments(extra_args or [])
         args = self._build_pandoc_args(
             toc=toc, toc_depth=toc_depth, extra_args=extra_args
         )
@@ -196,32 +232,37 @@ class MarkdownToDocxConverter:
             from .exceptions import TemplateError
 
             try:
+                validate_archive(self.reference_doc, self.config.limits)
                 Document(str(self.reference_doc))
             except Exception as exc:
                 raise TemplateError(
                     str(self.reference_doc), f"Invalid DOCX template: {exc}"
                 ) from exc
         try:
-            parsed = subprocess.run(
+            parsed = run_pandoc(
                 [
-                    pypandoc.get_pandoc_path(),
                     "-f",
                     self.config.pandoc.reader_format,
                     "-t",
                     "json",
                     str(input_path.absolute()),
                 ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
                 timeout=self.config.pandoc.timeout_seconds,
+                phase="parse",
             )
             ast = json.loads(parsed.stdout)
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             raise ConversionError(
                 str(input_path), f"Unable to parse Markdown: {exc}", exc
             ) from exc
+        timings["parse"] = perf_counter() - started
+        annotated_start = perf_counter()
+        validate_resources(
+            ast,
+            input_path.absolute().parent,
+            offline=resource_offline,
+            restricted=restricted_mode,
+        )
         metadata = ast.get("meta", {})
 
         def meta_string(key: str) -> str | None:
@@ -271,9 +312,18 @@ class MarkdownToDocxConverter:
             ast, resolver, lang=document_lang, base_direction=document_dir
         )
         document.code_size_pt = self.config.template.code_size_pt
+        document.limits = self.config.limits
         annotated = document.annotate(toc=toc)
+        timings["annotate_fonts"] = perf_counter() - annotated_start
         with tempfile.TemporaryDirectory(prefix="md2docx-convert-") as temporary:
             root = Path(temporary)
+            if restricted_mode:
+                stage_local_resources(
+                    annotated,
+                    input_path.absolute().parent,
+                    root,
+                    max_bytes=self.config.limits.input_bytes,
+                )
             ast_path = root / "input.json"
             ast_path.write_text(
                 json.dumps(annotated, ensure_ascii=False), encoding="utf-8"
@@ -288,7 +338,9 @@ class MarkdownToDocxConverter:
             )
             if self.reference_doc is None:
                 reference = DocxTemplateManager.create_reference(
-                    root / "reference.docx", self.config.template
+                    root / "reference.docx",
+                    self.config.template,
+                    timeout=self.config.pandoc.timeout_seconds,
                 )
                 args.extend(["--reference-doc", str(reference)])
             try:
@@ -296,19 +348,25 @@ class MarkdownToDocxConverter:
                     output_path, overwrite=self.config.conversion.overwrite_existing
                 ) as stage:
                     try:
-                        pypandoc.convert_file(
+                        write_start = perf_counter()
+                        write_docx(
                             str(ast_path),
                             to="docx",
                             format="json",
                             outputfile=str(stage),
                             extra_args=args,
+                            timeout=self.config.pandoc.timeout_seconds,
                         )
                     except OSError as exc:
                         raise PandocNotFoundError() from exc
+                    except PandocError:
+                        raise
                     except Exception as exc:
                         raise ConversionError(
                             str(input_path), f"Pandoc conversion failed: {exc}", exc
                         ) from exc
+                    timings["write"] = perf_counter() - write_start
+                    apply_start = perf_counter()
                     try:
                         self._validate_docx_output(stage)
                         if self.reference_doc:
@@ -319,7 +377,9 @@ class MarkdownToDocxConverter:
                         raise ValidationError(
                             str(output_path), exc.validation_errors
                         ) from exc
+                    timings["apply_validate"] = perf_counter() - apply_start
                     checks["structure"] = "passed"
+                    preview_start = perf_counter()
                     preview = (
                         render_preview(
                             stage,
@@ -329,6 +389,7 @@ class MarkdownToDocxConverter:
                                 else output_path.with_suffix(".preview")
                             ),
                             resolver,
+                            max_pages=self.config.limits.preview_pages,
                         )
                         if render
                         else {
@@ -337,6 +398,10 @@ class MarkdownToDocxConverter:
                         }
                     )
                     checks["rendering"] = preview["status"]
+                    timings["preview"] = perf_counter() - preview_start
+                    font_reports = [
+                        font.report() for font in resolver.selected.values()
+                    ]
             except OSError as exc:
                 raise ConversionError(
                     str(input_path), f"Unable to publish DOCX output: {exc}", exc
@@ -356,15 +421,18 @@ class MarkdownToDocxConverter:
                     "message": "Unverified fonts were explicitly allowed",
                 }
             )
+        timings["total"] = perf_counter() - started
         return ConversionReport(
             str(output_path),
             document.lang,
             sorted(document.languages),
             sorted(document.scripts),
-            [font.report() for font in resolver.selected.values()],
+            font_reports,
             warnings,
             checks,
             preview,
+            timings=timings,
+            tools={"pandoc": self.pandoc_version},
         )
 
     @staticmethod
@@ -473,7 +541,17 @@ class MarkdownToDocxConverter:
                 "--output",
                 "--reference-doc",
             }
-            if any(argument.split("=", 1)[0] in reserved for argument in extra_args):
+            if any(
+                argument.split("=", 1)[0] in reserved
+                or (
+                    argument.startswith(("-f", "-t", "-o"))
+                    and not argument.startswith("--")
+                )
+                or argument == "--"
+                or argument.split("=", 1)[0] in {"--defaults", "-d"}
+                or (argument.startswith("-d") and not argument.startswith("--"))
+                for argument in extra_args
+            ):
                 raise ConversionError(
                     "",
                     "Use the converter options instead of overriding the input/output format or template via extra_args",
@@ -539,6 +617,8 @@ class MarkdownToDocxConverter:
         Raises:
             ValidationError: If validation fails
         """
+        if output_path.is_file() and output_path.stat().st_size:
+            validate_archive(output_path, self.config.limits)
         validation_errors = []
 
         try:
