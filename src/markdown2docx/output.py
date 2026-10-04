@@ -21,7 +21,7 @@ def _open_parent(path: Path) -> int:
     ):
         raise OSError("Secure DOCX publication is not supported on this platform")
 
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY") | getattr(os, "O_NOFOLLOW")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     absolute = path.absolute()
     descriptor = os.open(absolute.anchor, flags)
     root = os.fstat(descriptor)
@@ -91,19 +91,16 @@ def _publish(source: Path, destination: Path, parent: int, overwrite: bool) -> N
     os.mkdir(staging_name, mode=0o700, dir_fd=parent)
     staging = os.open(
         staging_name,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY") | getattr(os, "O_NOFOLLOW"),
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         dir_fd=parent,
     )
     try:
         info = os.fstat(staging)
-        if (
-            info.st_uid != getattr(os, "geteuid")()
-            or stat.S_IMODE(info.st_mode) & 0o077
-        ):
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise OSError("Output staging directory is not private")
         file_descriptor = os.open(
             "document.docx",
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW"),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
             dir_fd=staging,
         )
@@ -134,8 +131,11 @@ def _publish(source: Path, destination: Path, parent: int, overwrite: bool) -> N
 
 def _writer_temporary_root() -> Path:
     """Use a stable OS namespace rather than an arbitrary TMPDIR pathname."""
-    root = Path("/private/tmp" if sys.platform == "darwin" else "/tmp")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY") | getattr(os, "O_NOFOLLOW")
+    # verified ownership and sticky permissions below
+    root = Path(
+        "/private/tmp" if sys.platform == "darwin" else "/tmp"  # nosec B108
+    )
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     descriptor = os.open(root.anchor, flags)
     try:
         for component in root.parts[1:]:
@@ -183,9 +183,12 @@ def _windows_output(destination: Path, *, overwrite: bool) -> Iterator[Path]:
     while path-based writing and publication are in progress.
     """
     import ctypes
+    from typing import Any, cast
+
+    windows = cast(Any, ctypes)
     from ctypes import wintypes
 
-    kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    kernel = windows.WinDLL("kernel32", use_last_error=True)
     kernel.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
         wintypes.DWORD,
@@ -214,13 +217,13 @@ def _windows_output(destination: Path, *, overwrite: bool) -> Iterator[Path]:
     def pin(path: Path) -> None:
         handle = kernel.CreateFileW(str(path), 0x80, 0x3, None, 3, 0x02200000, None)
         if handle == ctypes.c_void_p(-1).value:
-            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+            raise windows.WinError(windows.get_last_error())
         info = Attributes()
         if not kernel.GetFileInformationByHandleEx(
             handle, 9, ctypes.byref(info), ctypes.sizeof(info)
         ):
             kernel.CloseHandle(handle)
-            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+            raise windows.WinError(windows.get_last_error())
         if info.attributes & 0x400 or not info.attributes & 0x10:
             kernel.CloseHandle(handle)
             raise OSError(f"Refusing unsafe output directory/reparse point: {path}")

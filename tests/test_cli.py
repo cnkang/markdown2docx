@@ -20,6 +20,21 @@ from markdown2docx.cli import (
 )
 from markdown2docx.config import MarkdownToDocxConfig
 from markdown2docx.exceptions import MarkdownToDocxError
+from markdown2docx.report import ConversionReport
+
+
+@pytest.fixture(autouse=True)
+def restore_application_logging():
+    import logging
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    yield
+    for handler in root.handlers:
+        if handler not in handlers:
+            handler.close()
+    root.handlers = handlers
+    root.setLevel(level)
 
 
 @pytest.fixture
@@ -69,7 +84,7 @@ def test_cli_basic_conversion(sample_markdown_content):
         result = run_cli_command([str(input_file)])
 
         assert result.returncode == 0
-        assert "Successfully converted" in result.stdout
+        assert "output" in result.stdout or "test.docx" in result.stdout
 
         output_file = input_file.with_suffix(".docx")
         assert output_file.exists()
@@ -98,7 +113,7 @@ def test_cli_template_creation():
         result = run_cli_command(["--create-template", str(template_file)])
 
         assert result.returncode == 0
-        assert "Created modern DOCX template" in result.stdout
+        assert str(template_file) in result.stdout
         assert template_file.exists()
 
 
@@ -118,7 +133,7 @@ def test_cli_with_template(sample_markdown_content):
         result = run_cli_command([str(input_file), "--template", str(template_file)])
 
         assert result.returncode == 0
-        assert "Successfully converted" in result.stdout
+        assert "output" in result.stdout or "test.docx" in result.stdout
 
 
 def test_cli_with_toc(sample_markdown_content):
@@ -131,7 +146,7 @@ def test_cli_with_toc(sample_markdown_content):
         result = run_cli_command([str(input_file), "--toc", "--toc-depth", "2"])
 
         assert result.returncode == 0
-        assert "Successfully converted" in result.stdout
+        assert "output" in result.stdout or "test.docx" in result.stdout
 
 
 def test_cli_nonexistent_file():
@@ -260,7 +275,9 @@ class TestHandleTemplateCreation:
         result = handle_template_creation("new_template.docx", verbose=False)
 
         assert result == 0
-        mock_create.assert_called_once_with("new_template.docx", config=None, add_sample=True)
+        mock_create.assert_called_once_with(
+            "new_template.docx", config=None, add_sample=True
+        )
 
     @patch("markdown2docx.cli.DocxTemplateManager.create_modern_template")
     def test_handle_template_creation_verbose(self, mock_create):
@@ -329,7 +346,9 @@ class TestHandleConversion:
                     "markdown2docx.cli.MarkdownToDocxConverter"
                 ) as mock_converter_class:
                     mock_converter = Mock()
-                    mock_converter.convert.return_value = Path("output.docx")
+                    mock_converter.convert_with_report.return_value = ConversionReport(
+                        "output.docx", None, [], [], []
+                    )
                     mock_converter_class.return_value = mock_converter
 
                     result = handle_conversion(
@@ -344,8 +363,8 @@ class TestHandleConversion:
                     )
 
                     assert result == 0
-                    mock_converter.convert.assert_called_once()
-                    call_kwargs = mock_converter.convert.call_args[1]
+                    mock_converter.convert_with_report.assert_called_once()
+                    call_kwargs = mock_converter.convert_with_report.call_args[1]
                     assert call_kwargs["toc"] is False
             finally:
                 Path(input_path).unlink()
@@ -365,7 +384,9 @@ class TestHandleConversion:
                     "markdown2docx.cli.MarkdownToDocxConverter"
                 ) as mock_converter_class:
                     mock_converter = Mock()
-                    mock_converter.convert.return_value = Path("output.docx")
+                    mock_converter.convert_with_report.return_value = ConversionReport(
+                        "output.docx", None, [], [], []
+                    )
                     mock_converter_class.return_value = mock_converter
 
                     result = handle_conversion(
@@ -380,7 +401,7 @@ class TestHandleConversion:
                     )
 
                     assert result == 0
-                    call_kwargs = mock_converter.convert.call_args[1]
+                    call_kwargs = mock_converter.convert_with_report.call_args[1]
                     assert call_kwargs["toc"] is None
             finally:
                 Path(input_path).unlink()
@@ -400,7 +421,9 @@ class TestHandleConversion:
                     "markdown2docx.cli.MarkdownToDocxConverter"
                 ) as mock_converter_class:
                     mock_converter = Mock()
-                    mock_converter.convert.return_value = Path("output.docx")
+                    mock_converter.convert_with_report.return_value = ConversionReport(
+                        "output.docx", None, [], [], []
+                    )
                     mock_converter_class.return_value = mock_converter
 
                     result = handle_conversion(
@@ -417,8 +440,8 @@ class TestHandleConversion:
                     assert result == 0
 
                     # Verify converter was called with correct arguments
-                    mock_converter.convert.assert_called_once()
-                    call_kwargs = mock_converter.convert.call_args[1]
+                    mock_converter.convert_with_report.assert_called_once()
+                    call_kwargs = mock_converter.convert_with_report.call_args[1]
                     assert call_kwargs["toc"] is True
                     assert call_kwargs["toc_depth"] == 4
                     assert call_kwargs["validate_output"] is True
@@ -431,12 +454,12 @@ class TestHandleConversion:
 
         with patch("markdown2docx.cli.MarkdownToDocxConverter") as mock_converter_class:
             mock_converter = Mock()
-            mock_converter.convert.side_effect = MarkdownToDocxError(
+            mock_converter.convert_with_report.side_effect = MarkdownToDocxError(
                 "Conversion failed"
             )
             mock_converter_class.return_value = mock_converter
 
-            with patch("markdown2docx.cli.logger") as mock_logger:
+            with patch("builtins.print") as mock_print:
                 result = handle_conversion(
                     input_path="nonexistent.md",
                     output_path=None,
@@ -449,7 +472,10 @@ class TestHandleConversion:
                 )
 
                 assert result == 1
-                mock_logger.error.assert_called()
+                assert any(
+                    "Conversion failed" in str(call)
+                    for call in mock_print.call_args_list
+                )
 
     def test_handle_conversion_verbose_output(self):
         """Test conversion with verbose output."""
@@ -466,7 +492,9 @@ class TestHandleConversion:
                     "markdown2docx.cli.MarkdownToDocxConverter"
                 ) as mock_converter_class:
                     mock_converter = Mock()
-                    mock_converter.convert.return_value = Path("output.docx")
+                    mock_converter.convert_with_report.return_value = ConversionReport(
+                        "output.docx", None, [], [], []
+                    )
                     mock_converter_class.return_value = mock_converter
 
                     with patch("builtins.print") as mock_print:
@@ -485,10 +513,7 @@ class TestHandleConversion:
 
                         # Check verbose output
                         print_calls = [call[0][0] for call in mock_print.call_args_list]
-                        assert any(
-                            "Conversion completed successfully" in call
-                            for call in print_calls
-                        )
+                        assert any("output.docx" in call for call in print_calls)
                         assert any("Input:" in call for call in print_calls)
                         assert any("Output:" in call for call in print_calls)
                         assert any("Template:" in call for call in print_calls)
@@ -527,14 +552,17 @@ class TestMainFunction:
                     main()
 
     def test_main_create_template(self):
-        """Test main function with create template option."""
+        """Template generation shares the same content-free default across modes."""
         with patch("sys.argv", ["markdown2docx", "--create-template", "template.docx"]):
-            with patch("markdown2docx.cli.handle_template_creation") as mock_handle:
-                mock_handle.return_value = 0
-
-                main()  # Should not raise SystemExit
-                mock_handle.assert_called_once_with(
-                    "template.docx", False, config=MarkdownToDocxConfig().template
+            with patch(
+                "markdown2docx.cli.DocxTemplateManager.create_modern_template"
+            ) as create:
+                create.return_value = Path("template.docx")
+                main()
+                create.assert_called_once_with(
+                    "template.docx",
+                    config=MarkdownToDocxConfig().template,
+                    add_sample=False,
                 )
 
     def test_main_conversion(self):
@@ -697,16 +725,18 @@ class TestCLIIntegration:
                             "markdown2docx.cli.MarkdownToDocxConverter"
                         ) as mock_converter_class:
                             mock_converter = Mock()
-                            mock_converter.convert.return_value = Path(output_path)
+                            mock_converter.convert_with_report.return_value = (
+                                ConversionReport(str(output_path), None, [], [], [])
+                            )
                             mock_converter_class.return_value = mock_converter
 
-                            result = main()
+                            main()
 
                             # Should not raise SystemExit
-                            mock_converter.convert.assert_called_once()
+                            mock_converter.convert_with_report.assert_called_once()
 
                             # Verify correct arguments were passed
-                            call_args = mock_converter.convert.call_args
+                            call_args = mock_converter.convert_with_report.call_args
                             assert str(call_args[0][0]) == input_path  # input_path
                             assert str(call_args[0][1]) == output_path  # output_path
                             assert call_args[1]["toc"] is True
@@ -735,16 +765,17 @@ class TestCLIIntegration:
                     ) as mock_create:
                         mock_create.return_value = Path(template_path)
 
-                        result = main()
+                        main()
 
                         # main() doesn't return a value, it exits with sys.exit()
                         # If we reach here, it means no exception was raised
                         mock_create.assert_called_once_with(
-                            template_path, config=MarkdownToDocxConfig().template, add_sample=True
+                            template_path,
+                            config=MarkdownToDocxConfig().template,
+                            add_sample=False,
                         )
             finally:
                 Path(template_path).unlink(missing_ok=True)
-
 
 
 @pytest.mark.parametrize("mode", [[], ["--json"], ["--ui-lang", "zh"]])
@@ -785,6 +816,7 @@ def test_create_template_applies_loaded_config(tmp_path, monkeypatch, mode):
 @pytest.mark.parametrize("status", ["rendered", "unverified", "failed"])
 def test_render_cli_reports_status_and_reason(monkeypatch, capsys, locale, status):
     from types import SimpleNamespace
+
     from markdown2docx.messages import message
 
     report = SimpleNamespace(

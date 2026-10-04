@@ -192,9 +192,10 @@ def test_lost_text_does_not_replace_existing_document(tmp_path, monkeypatch):
     source.write_text("Important 中文 العربية")
     output = source.with_suffix(".docx")
     output.write_bytes(b"original")
-    import pypandoc
 
-    original = pypandoc.convert_file
+    from markdown2docx.runner import write_docx
+
+    original = write_docx
 
     def lose_text(*args, outputfile, **kwargs):
         original(*args, outputfile=outputfile, **kwargs)
@@ -207,7 +208,7 @@ def test_lost_text_does_not_replace_existing_document(tmp_path, monkeypatch):
             for name, value in entries.items():
                 archive.writestr(name, value)
 
-    monkeypatch.setattr("markdown2docx.converter.pypandoc.convert_file", lose_text)
+    monkeypatch.setattr("markdown2docx.converter.write_docx", lose_text)
     with pytest.raises(ValidationError) as error:
         MarkdownToDocxConverter().convert(source, output)
     assert error.value.output_file == str(output)

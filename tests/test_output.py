@@ -4,8 +4,6 @@ import os
 from pathlib import Path
 
 import pytest
-
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX directory descriptor race tests")
 from docx import Document
 from docx.document import Document as DocumentType
 
@@ -28,16 +26,15 @@ def render_docx_fixture(request, monkeypatch, tmp_path):
                 MarkdownToDocxConverter, "_validate_pandoc", lambda _: None
             )
 
-            from markdown2docx.converter import pypandoc
-            original_convert = pypandoc.convert_file
+            from markdown2docx.runner import write_docx
+
+            original_convert = write_docx
 
             def convert(*args, outputfile, **kwargs):
                 before_write()
                 return original_convert(*args, outputfile=outputfile, **kwargs)
 
-            monkeypatch.setattr(
-                "markdown2docx.converter.pypandoc.convert_file", convert
-            )
+            monkeypatch.setattr("markdown2docx.converter.write_docx", convert)
             return MarkdownToDocxConverter().convert(
                 source, destination, validate_output=validate
             )
@@ -78,6 +75,11 @@ def test_parent_symlink_is_rejected(render, tmp_path, existing):
     with pytest.raises((ConversionError, TemplateError)):
         render(alias / "nested" / "report.docx")
     assert not (protected / "nested").exists()
+
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX directory descriptor race tests"
+)
 
 
 def test_leaf_swap_during_generation_preserves_target(render, tmp_path):
@@ -208,7 +210,7 @@ def test_validation_failure_preserves_existing_output(monkeypatch, tmp_path):
     def invalid(*_args, outputfile, **_kwargs):
         Path(outputfile).write_bytes(b"invalid")
 
-    monkeypatch.setattr("markdown2docx.converter.pypandoc.convert_file", invalid)
+    monkeypatch.setattr("markdown2docx.converter.write_docx", invalid)
     with pytest.raises(ValidationError) as error:
         MarkdownToDocxConverter().convert(source, validate_output=True)
     assert error.value.output_file == str(output)

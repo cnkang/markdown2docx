@@ -14,8 +14,8 @@ from .exceptions import (
 from .fonts import FontError
 from .report import ConversionReport
 from .templates import DocxTemplateManager
+from .version import __version__ as __version__
 
-__version__ = "0.2.0"
 __all__ = [
     "MarkdownToDocxConverter",
     "ConversionReport",

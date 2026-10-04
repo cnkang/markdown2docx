@@ -6,9 +6,10 @@ default values, environment variables, and configuration files.
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -23,12 +24,7 @@ class PandocConfig:
     """Minimum recommended Pandoc version."""
 
     reader_format: str = (
-        "gfm"
-        "+footnotes"
-        "+tex_math_dollars"
-        "+fenced_divs"
-        "+bracketed_spans"
-        "+yaml_metadata_block"
+        "gfm+footnotes+tex_math_dollars+fenced_divs+bracketed_spans+yaml_metadata_block"
     )
     """Default Markdown reader format with extensions."""
 
@@ -108,6 +104,19 @@ class InternationalConfig:
     offline: bool = False
     allow_unverified_fonts: bool = False
     font_cache: str | None = None
+    resources_offline: bool = False
+    restricted: bool = False
+
+
+@dataclass
+class LimitsConfig:
+    """Resource budgets; limits fail explicitly without truncating content."""
+
+    input_bytes: int = 64 * 1024 * 1024
+    archive_bytes: int = 512 * 1024 * 1024
+    archive_entries: int = 10000
+    xml_bytes: int = 64 * 1024 * 1024
+    preview_pages: int = 200
 
 
 @dataclass
@@ -119,6 +128,69 @@ class MarkdownToDocxConfig:
     conversion: ConversionConfig = field(default_factory=ConversionConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     international: InternationalConfig = field(default_factory=InternationalConfig)
+
+    limits: LimitsConfig = field(default_factory=LimitsConfig)
+
+    def validate(self) -> None:
+        """Check configuration at both file and API boundaries."""
+        for section_field in fields(self):
+            section = getattr(self, section_field.name)
+            for setting in fields(section):
+                value = getattr(section, setting.name)
+                default = getattr(type(section)(), setting.name)
+                key = f"{section_field.name}.{setting.name}"
+                if default is None:
+                    valid = value is None or isinstance(value, str)
+                elif isinstance(default, bool):
+                    valid = type(value) is bool
+                elif isinstance(default, int):
+                    valid = type(value) is int and value > 0
+                elif isinstance(default, float):
+                    valid = (
+                        type(value) in (int, float)
+                        and math.isfinite(value)
+                        and value > 0
+                    )
+                else:
+                    valid = isinstance(value, str) and bool(value.strip())
+                if not valid:
+                    raise ConfigurationError(key, f"Invalid value: {value!r}")
+        if self.template.page_size not in {"A4", "Letter"}:
+            raise ConfigurationError("template.page_size", "Expected A4 or Letter")
+        if not 1 <= self.conversion.default_toc_depth <= 6:
+            raise ConfigurationError(
+                "conversion.default_toc_depth", "Expected 1 through 6"
+            )
+        if self.international.direction not in {"auto", "ltr", "rtl"}:
+            raise ConfigurationError(
+                "international.direction", "Expected auto, ltr or rtl"
+            )
+        if self.logging.level.upper() not in {
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        }:
+            raise ConfigurationError("logging.level", "Unknown logging level")
+        if self.conversion.create_backup:
+            raise ConfigurationError(
+                "conversion.create_backup",
+                "Backups are unsupported; preserve copies explicitly",
+            )
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            Version(self.pandoc.min_version)
+        except InvalidVersion as exc:
+            raise ConfigurationError("pandoc.min_version", "Invalid version") from exc
+        if self.international.lang is not None:
+            import langcodes
+
+            if not langcodes.tag_is_valid(self.international.lang):
+                raise ConfigurationError(
+                    "international.lang", "Invalid BCP 47 language"
+                )
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> MarkdownToDocxConfig:
@@ -133,23 +205,38 @@ class MarkdownToDocxConfig:
         Raises:
             ConfigurationError: If configuration is invalid
         """
+        section_types = {
+            "pandoc": PandocConfig,
+            "template": TemplateConfig,
+            "conversion": ConversionConfig,
+            "logging": LoggingConfig,
+            "international": InternationalConfig,
+            "limits": LimitsConfig,
+        }
+        for name, values in config_dict.items():
+            if name not in section_types:
+                raise ConfigurationError(name, "Unknown configuration section")
+            if not isinstance(values, dict):
+                raise ConfigurationError(name, "Expected a mapping")
+            known = {item.name for item in fields(section_types[name])}
+            for key in values:
+                if key not in known:
+                    raise ConfigurationError(
+                        f"{name}.{key}", "Unknown configuration field"
+                    )
         try:
-            pandoc_config = PandocConfig(**config_dict.get("pandoc", {}))
-            template_config = TemplateConfig(**config_dict.get("template", {}))
-            conversion_config = ConversionConfig(**config_dict.get("conversion", {}))
-            logging_config = LoggingConfig(**config_dict.get("logging", {}))
-
-            return cls(
-                pandoc=pandoc_config,
-                template=template_config,
-                conversion=conversion_config,
-                logging=logging_config,
-                international=InternationalConfig(
-                    **config_dict.get("international", {})
-                ),
+            result = cls(
+                **{
+                    name: kind(**config_dict.get(name, {}))
+                    for name, kind in section_types.items()
+                }
             )
-        except TypeError as e:
-            raise ConfigurationError(None, f"Invalid configuration format: {e}") from e
+        except TypeError as exc:
+            raise ConfigurationError(
+                None, f"Invalid configuration format: {exc}"
+            ) from exc
+        result.validate()
+        return result
 
     @classmethod
     def from_env(cls) -> MarkdownToDocxConfig:
@@ -221,7 +308,41 @@ def _parse_env_config() -> Dict[str, Any]:
             section, setting = config_key.split("__", 1)
             section_values = config_dict.setdefault(section, {})
             if isinstance(section_values, dict):
-                section_values[setting] = _parse_env_value(value)
+                boolean_fields = {
+                    "default_toc",
+                    "validate_output",
+                    "create_backup",
+                    "overwrite_existing",
+                    "offline",
+                    "allow_unverified_fonts",
+                    "resources_offline",
+                    "restricted",
+                }
+                numeric_fields = {
+                    "timeout_seconds",
+                    "default_toc_depth",
+                    "body_size_pt",
+                    "code_size_pt",
+                    "input_bytes",
+                    "archive_bytes",
+                    "archive_entries",
+                    "xml_bytes",
+                    "preview_pages",
+                }
+                if setting in boolean_fields:
+                    section_values[setting] = _parse_env_value(value)
+                elif setting in numeric_fields:
+                    try:
+                        section_values[setting] = int(value)
+                    except ValueError:
+                        section_values[setting] = value
+                elif setting == "margin_cm":
+                    try:
+                        section_values[setting] = float(value)
+                    except ValueError:
+                        section_values[setting] = value
+                else:
+                    section_values[setting] = value
         else:
             config_dict[config_key] = _parse_env_value(value)
 
@@ -298,7 +419,7 @@ def load_config(config_path: Optional[Path] = None) -> MarkdownToDocxConfig:
         ConfigurationError: If configuration file is invalid
     """
     file_config: Dict[str, Any] = {}
-    if config_path and config_path.exists():
+    if config_path is not None:
         file_config = _load_config_file(config_path)
 
     env_config = _parse_env_config()

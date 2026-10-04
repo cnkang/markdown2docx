@@ -25,13 +25,16 @@ def message(locale: str, key: str, **values: object) -> str:
 
 
 HELP_ZH = {
+    "Include sample content in a newly created template": "在新模板中包含样例正文",
+    "Reject remote document images (independent of font downloads)": "禁止远程图片（与字体下载独立）",
+    "Limit local images to the document directory and disallow raw content": "限制本地图片在文档目录内并禁止 raw 内容",
     "Input Markdown file path": "输入 Markdown 文件路径",
     "Output DOCX file path (default: input file with .docx extension)": "输出 DOCX 路径（默认与输入同名）",
     "Reference DOCX template file for styling": "可选的 DOCX 样式参考文件",
     "Create a modern DOCX template and exit": "创建 DOCX 模板后退出",
     "Include table of contents in output (use --no-toc to disable)": "生成目录（--no-toc 禁用）",
     "Table of contents depth (1-6, default from config)": "目录层级（1-6，默认使用配置）",
-    "Validate output DOCX file after conversion (use --no-validate to skip)": "兼容参数；必要的结构和完整性检查始终执行",
+    "Compatibility option; required integrity checks always run": "兼容参数；必要的结构和完整性检查始终执行",
     "Enable verbose logging output": "输出详细日志",
     "Suppress all output except errors": "仅输出错误",
     "Path to configuration file (YAML/TOML)": "配置文件路径（YAML/TOML）",

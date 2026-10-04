@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
@@ -363,16 +362,18 @@ class DocxTemplateManager:
     # ---------- Static method for backward compatibility ----------
 
     @classmethod
-    def create_reference(cls, output_path: Path, config: TemplateConfig) -> Path:
+    def create_reference(
+        cls, output_path: Path, config: TemplateConfig, *, timeout: int = 60
+    ) -> Path:
         """Derive a content-free reference from the installed Pandoc defaults."""
-        import pypandoc
         from docx.oxml.ns import qn
 
-        result = subprocess.run(
-            [pypandoc.get_pandoc_path(), "--print-default-data-file", "reference.docx"],
-            capture_output=True,
-            check=True,
-            timeout=60,
+        from .runner import run_pandoc
+
+        result = run_pandoc(
+            ["--print-default-data-file", "reference.docx"],
+            timeout=timeout,
+            phase="reference",
         )
         output_path.write_bytes(result.stdout)
         doc = Document(str(output_path))
@@ -394,7 +395,7 @@ class DocxTemplateManager:
             props = style.element.get_or_add_rPr()
             fonts = props.find(qn("w:rFonts"))
             for attr in list(fonts.attrib):
-                if attr.endswith("Theme"):
+                if attr.lower().endswith("theme"):
                     del fonts.attrib[attr]
             for slot in ("ascii", "hAnsi", "eastAsia", "cs"):
                 fonts.set(qn("w:" + slot), family)

@@ -11,12 +11,13 @@ import sys
 from pathlib import Path
 from typing import Never, Optional
 
-from .config import MarkdownToDocxConfig, TemplateConfig, load_config
+from .config import LoggingConfig, MarkdownToDocxConfig, TemplateConfig, load_config
 from .converter import MarkdownToDocxConverter
-from .exceptions import MarkdownToDocxError
+from .exceptions import ConfigurationError, MarkdownToDocxError
 from .messages import HELP_ZH, message
 from .report import doctor
 from .templates import DocxTemplateManager
+from .version import __version__
 
 # Configure CLI logger
 logger = logging.getLogger(__name__)
@@ -83,6 +84,25 @@ Configuration:
         help="Create a modern DOCX template and exit",
     )
 
+    parser.add_argument(
+        "--template-sample",
+        action="store_true",
+        help="Include sample content in a newly created template",
+    )
+
+    parser.add_argument(
+        "--resources-offline",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Reject remote document images (independent of font downloads)",
+    )
+    parser.add_argument(
+        "--restricted",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Limit local images to the document directory and disallow raw content",
+    )
+
     # Table of contents arguments
     parser.add_argument(
         "--toc",
@@ -102,7 +122,7 @@ Configuration:
         "--validate",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Validate output DOCX file after conversion (use --no-validate to skip)",
+        help="Compatibility option; required integrity checks always run",
     )
 
     # Logging and verbosity
@@ -119,7 +139,9 @@ Configuration:
     )
 
     # Version information
-    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument(
         "--lang", help="Document BCP 47 language; local lang spans may override it"
     )
@@ -171,7 +193,9 @@ Configuration:
     return parser
 
 
-def setup_logging(verbose: bool = False, quiet: bool = False) -> None:
+def setup_logging(
+    verbose: bool = False, quiet: bool = False, config: LoggingConfig | None = None
+) -> None:
     """Configure logging based on verbosity settings.
 
     Args:
@@ -183,10 +207,21 @@ def setup_logging(verbose: bool = False, quiet: bool = False) -> None:
     elif verbose:
         level = logging.DEBUG
     else:
-        level = logging.INFO
+        level = getattr(logging, config.level.upper()) if config else logging.INFO
 
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if config and config.file_path:
+        try:
+            handlers.append(logging.FileHandler(config.file_path, encoding="utf-8"))
+        except OSError as exc:
+            raise ConfigurationError(
+                "logging.file_path", f"Unable to open log file: {exc}"
+            ) from exc
     logging.basicConfig(
-        level=level, format="%(levelname)s: %(message)s", stream=sys.stderr
+        level=level,
+        format=config.format if config else "%(levelname)s: %(message)s",
+        handlers=handlers,
+        force=True,
     )
 
 
@@ -237,6 +272,18 @@ def handle_conversion(
     validate: Optional[bool],
     config: MarkdownToDocxConfig,
     verbose: bool = False,
+    *,
+    quiet: bool = False,
+    json_output: bool = False,
+    ui_lang: str = "en",
+    lang: str | None = None,
+    direction: str | None = None,
+    offline: bool | None = None,
+    allow_unverified_fonts: bool | None = None,
+    resources_offline: bool | None = None,
+    restricted: bool | None = None,
+    render: bool = False,
+    preview_dir: Path | None = None,
 ) -> int:
     """Handle Markdown to DOCX conversion.
 
@@ -257,45 +304,55 @@ def handle_conversion(
         # Initialize converter
         converter = MarkdownToDocxConverter(reference_doc=template_path, config=config)
 
-        # Perform conversion
-        result_path = converter.convert(
+        report = converter.convert_with_report(
             input_path,
             output_path,
             toc=toc,
             toc_depth=toc_depth,
             validate_output=validate,
+            lang=lang,
+            direction=direction,
+            offline=offline,
+            allow_unverified_fonts=allow_unverified_fonts,
+            resources_offline=resources_offline,
+            restricted=restricted,
+            render=render,
+            preview_dir=preview_dir,
         )
-
-        # Success output
-        if not verbose:
-            print(f"✅ Successfully converted {input_path} to {result_path}")
-        else:
-            print("✅ Conversion completed successfully")
-            print(f"   📄 Input: {input_path}")
-            print(f"   📁 Output: {result_path}")
-            if template_path:
-                print(f"   🎨 Template: {template_path}")
-            effective_toc = toc if toc is not None else config.conversion.default_toc
-            if effective_toc:
-                depth = toc_depth or config.conversion.default_toc_depth
-                print(f"   📑 Table of contents: {depth} levels")
-
-            # Show Pandoc version info
-            try:
-                pandoc_version = converter.get_pandoc_version()
-                print(f"   🔧 Pandoc version: {pandoc_version}")
-            except MarkdownToDocxError:
-                logger.debug("Pandoc version unavailable for verbose output")
-
+        if json_output:
+            print(json.dumps(report.to_dict(), ensure_ascii=False))
+        elif not quiet:
+            print(message(ui_lang, "success", path=report.output_path))
+            if verbose:
+                print(f"Input: {input_path}")
+                print(f"Output: {report.output_path}")
+                print(f"Pandoc: {converter.get_pandoc_version()}")
+                if toc if toc is not None else config.conversion.default_toc:
+                    print(
+                        f"Table of contents: {toc_depth or config.conversion.default_toc_depth}"
+                    )
+                if template_path:
+                    print(f"Template: {template_path}")
+            if render:
+                print(
+                    message(
+                        ui_lang,
+                        "preview",
+                        status=report.preview.get("status", "unverified"),
+                        reason=report.preview.get("reason", ""),
+                    )
+                )
+            for warning in report.warnings:
+                print(message(ui_lang, "warning", **warning), file=sys.stderr)
         return 0
-
-    except MarkdownToDocxError as e:
-        logger.error("Conversion failed: %s", e)
-        if verbose and e.details:
-            logger.error("Details: %s", e.details)
-        return 1
-    except Exception as e:
-        logger.error("Unexpected error during conversion: %s", e)
+    except Exception as exc:
+        if json_output:
+            emit_error(exc)
+        else:
+            print(
+                message(ui_lang, "failure", code=error_code(exc), message=str(exc)),
+                file=sys.stderr,
+            )
         return 1
 
 
@@ -348,12 +405,10 @@ def main() -> None:
     parser = create_argument_parser(ui_lang)
     args = parser.parse_args()
 
-    # Setup logging first
-    setup_logging(verbose=args.verbose, quiet=args.quiet)
-
     # Load configuration
     try:
         config = load_config(args.config if hasattr(args, "config") else None)
+        setup_logging(args.verbose, args.quiet, config.logging)
     except Exception as e:
         if getattr(args, "json", False) is True:
             emit_error(e)
@@ -372,21 +427,22 @@ def main() -> None:
         )
         return
 
-    # Handle template creation
-    if args.create_template and (
-        getattr(args, "json", False) is True or ui_lang == "zh"
-    ):
+    if args.create_template:
         try:
             path = DocxTemplateManager.create_modern_template(
-                args.create_template, config=config.template, add_sample=False
+                args.create_template,
+                config=config.template,
+                add_sample=args.template_sample,
             )
-            print(
-                json.dumps(
-                    {"status": "success", "output_path": str(path)}, ensure_ascii=False
+            if args.json:
+                print(
+                    json.dumps(
+                        {"status": "success", "output_path": str(path)},
+                        ensure_ascii=False,
+                    )
                 )
-                if args.json
-                else message(ui_lang, "success", path=path)
-            )
+            elif not args.quiet:
+                print(message(ui_lang, "success", path=path))
         except Exception as exc:
             if args.json:
                 emit_error(exc)
@@ -396,78 +452,12 @@ def main() -> None:
                     file=sys.stderr,
                 )
             sys.exit(1)
-        return
-    if args.create_template:
-        exit_code = handle_template_creation(
-            args.create_template, args.verbose, config=config.template
-        )
-        if exit_code != 0:
-            sys.exit(exit_code)
         return
 
     # Validate input file requirement
     if not args.input:
         parser.error("Input Markdown file is required (unless using --create-template)")
 
-    enhanced = (
-        any(getattr(args, flag, False) is True for flag in ("json", "render"))
-        or any(
-            isinstance(getattr(args, flag, None), (str, bool, Path))
-            for flag in (
-                "lang",
-                "direction",
-                "offline",
-                "allow_unverified_fonts",
-                "preview_dir",
-            )
-        )
-        or ui_lang == "zh"
-    )
-    if enhanced:
-        try:
-            converter = MarkdownToDocxConverter(
-                reference_doc=args.template, config=config
-            )
-            report = converter.convert_with_report(
-                args.input,
-                args.output,
-                toc=args.toc,
-                toc_depth=args.toc_depth,
-                validate_output=args.validate,
-                lang=args.lang,
-                direction=args.direction,
-                offline=args.offline,
-                allow_unverified_fonts=args.allow_unverified_fonts,
-                render=args.render,
-                preview_dir=args.preview_dir,
-            )
-            if args.json:
-                print(json.dumps(report.to_dict(), ensure_ascii=False))
-            elif not args.quiet:
-                print(message(args.ui_lang, "success", path=report.output_path))
-                if args.render:
-                    print(
-                        message(
-                            args.ui_lang,
-                            "preview",
-                            status=report.preview.get("status", "unverified"),
-                            reason=report.preview.get("reason", ""),
-                        )
-                    )
-                for warning in report.warnings:
-                    print(message(args.ui_lang, "warning", **warning), file=sys.stderr)
-        except Exception as exc:
-            if args.json:
-                emit_error(exc)
-            else:
-                print(
-                    message(ui_lang, "failure", code=error_code(exc), message=str(exc)),
-                    file=sys.stderr,
-                )
-            sys.exit(1)
-        return
-
-    # Handle conversion
     exit_code = handle_conversion(
         input_path=args.input,
         output_path=args.output,
@@ -477,6 +467,17 @@ def main() -> None:
         validate=args.validate,
         config=config,
         verbose=args.verbose,
+        quiet=args.quiet,
+        json_output=args.json,
+        ui_lang=args.ui_lang,
+        lang=args.lang,
+        direction=args.direction,
+        offline=args.offline,
+        allow_unverified_fonts=args.allow_unverified_fonts,
+        resources_offline=args.resources_offline,
+        restricted=args.restricted,
+        render=args.render,
+        preview_dir=args.preview_dir,
     )
 
     if exit_code != 0:
