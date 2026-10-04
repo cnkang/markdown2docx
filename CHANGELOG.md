@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Validate explicit configuration and resource budgets early; isolate converter configuration snapshots.
+- Bound Pandoc parsing/reference/writing stages and reject compact reserved output/format arguments.
+- Unify CLI report conversion and logging, quiet/JSON behavior and content-free template defaults.
+- Add optional remote-image offline and restricted resource policies with private image staging.
+- Stream DOCX entries, preserve user styles, independently verify serialized font/language/direction properties, and support refreshing font metadata/discovery.
+- Publish isolated preview generations, preserve previous results on failure, and sort pages numerically.
+- Version report schemas and record conversion IDs, actual tool versions and stage timings.
+- Use locked Ruff/mypy/pytest/Bandit checks, checksum-pinned Pandoc installs, offline fixture preparation, installed-wheel smoke tests and manual OIDC publishing workflows.
+
+Compatibility: missing/invalid explicit configurations now fail instead of silently falling back. Mutating the configuration passed to an existing converter no longer changes that converter. CLI templates omit sample content unless `--template-sample` is requested. Preview paths now point into generation directories. `create_backup=true` is rejected because it was not implemented. Each Pandoc stage has its own timeout rather than a shared task deadline.
+
 ## 0.2.0 — Unreleased
 
 - Convert CJK and UN official languages within the same paragraphs, headings and table cells, including local language/direction scopes and Arabic RTL.

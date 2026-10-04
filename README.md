@@ -128,10 +128,12 @@ npx skills add cnkang/markdown2docx --skill markdown-to-docx
 ## Validation and CI artifacts
 
 ```bash
-uv sync --group dev
+uv sync --locked --group dev --group test
+uv run python scripts/prepare_fonts.py
+make quality
 uv run pytest
 uv run mypy src/markdown2docx
-uv run python scripts/validate_multilingual.py --output-dir artifacts/multilingual
+uv run python scripts/validate_multilingual.py --offline --output-dir artifacts/multilingual
 # After installing the required fonts and rendering tools:
 uv run python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
 ```
@@ -143,3 +145,17 @@ See [examples](examples/README.md) and the [0.2.0 migration notes](CHANGELOG.md)
 ## License
 
 Project code: MIT. Downloaded fonts retain their own OFL licenses; they are not relicensed as MIT.
+
+## Reliability, resource boundaries and development checks
+
+Explicit missing configuration files, unknown keys, wrong types and out-of-range values fail before conversion. Each converter owns a configuration snapshot. `pandoc.timeout_seconds` applies separately to parsing, reference extraction and DOCX writing; timeouts return `PANDOC_TIMEOUT` and preserve existing DOCX output. Font download reads use 60-second timeouts and cache locks wait up to 120 seconds. LibreOffice and rasterization each have 120-second timeouts. There is currently no shared end-to-end deadline.
+
+`--offline` disables font downloads. `--resources-offline` additionally rejects remote images. `--restricted` limits local images to the input document directory, stages their bytes privately, and rejects raw content and arbitrary filter/defaults options. This policy does not replace an operating-system sandbox; Windows image staging still relies on the caller trusting its local directories. Trusted API callers may use Pandoc extensions in ordinary mode; reserved format/output/template arguments cannot override the pipeline.
+
+The `[limits]` section supports `input_bytes` (64 MiB), `archive_bytes` (512 MiB), `archive_entries` (10000), `xml_bytes` (64 MiB), and `preview_pages` (200). Exceeding a limit fails explicitly without truncating content. `conversion.create_backup=true` is unsupported and now fails explicitly; retain historical copies separately. `logging.file_path` configures a CLI log file. Required integrity checks always run.
+
+All CLI modes share one conversion flow. Quiet mode suppresses success and INFO output; JSON stdout contains only the result. CLI templates are content-free by default; use `--template-sample` to include examples. Reports add `schema_version`, `conversion_id`, `timings` and `tools`; see the [JSON schema](src/markdown2docx/report_schema.json). Previews use immutable `generation-*` directories and numeric page ordering. Failures preserve previous previews; consume paths from the report and apply your own retention policy to old generations.
+
+Development uses the uv lockfile, Ruff, mypy, pytest and Bandit. `make quality`, pre-commit and CI share tool versions and scopes. Prepare verified fonts with `scripts/prepare_fonts.py` before tests. In-process Python downloads must be mocked explicitly; CLI subprocess tests also require the prepared font cache. Default pytest does not generate coverage artifacts; CI collects branch coverage separately. `scripts/benchmark_conversion.py` records repeated segmentation and stage timing medians.
+
+CI verifies Pandoc archive SHA-256 and tests a built wheel outside the source checkout on all three platforms. `Publish distribution` is a manual workflow: dispatch it on a reviewed `vX.Y.Z` tag containing the workflow, and supply that same tag. Configure release environments, required approval and PyPI Trusted Publishing first; rehearse on TestPyPI before selecting PyPI. Publication uses OIDC and provenance attestations. This change does not publish packages automatically. The Agent execution pin remains the previous reviewed runtime; update it after publishing and testing the next execution commit.
