@@ -2,7 +2,9 @@
 """Invoke the pinned execution package without a repository checkout."""
 
 import shutil
-import subprocess
+
+# controlled argv, shell=False
+import subprocess  # nosec B404
 import sys
 
 EXECUTION_REVISION = "8b115d196347ca25be622fa4c2e513ae20501284"
@@ -16,7 +18,8 @@ def main() -> int:
             "markdown-to-docx requires uv: https://docs.astral.sh/uv/", file=sys.stderr
         )
         return 127
-    return subprocess.call(
+    # tool executable and argv, no shell
+    return subprocess.call(  # nosec B603
         [
             uv,
             "tool",
