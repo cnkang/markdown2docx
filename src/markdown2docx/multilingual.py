@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import os
+import shutil
+import tempfile
 import unicodedata
+import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +22,7 @@ import langcodes
 import regex  # type: ignore[import-untyped]
 from lxml import etree
 
+from .config import LimitsConfig
 from .exceptions import ConfigurationError, ValidationError
 from .fonts import FontResolver
 
@@ -103,23 +108,37 @@ def cjk_key(lang: str | None, text: str) -> tuple[str, bool]:
 
 
 def fragments(
-    text: str, lang: str | None, context: str, *, code: bool = False
+    text: str,
+    lang: str | None,
+    context: str,
+    *,
+    code: bool = False,
+    cjk: str | None = None,
 ) -> list[tuple[str, str, bool, str]]:
     """Split at grapheme boundaries; attach neutral punctuation to adjacent text."""
     clusters = regex.findall(r"\X", text)
     scripts = [script(c) for c in clusters]
+    following: list[str | None] = [None] * len(scripts)
+    next_script = None
+    for index in range(len(scripts) - 1, -1, -1):
+        following[index] = next_script
+        if scripts[index] != "Common":
+            next_script = scripts[index]
+    previous_script = None
     for index, name in enumerate(scripts):
         if name == "Common":
-            before = next((s for s in reversed(scripts[:index]) if s != "Common"), None)
-            after = next((s for s in scripts[index + 1 :] if s != "Common"), None)
             scripts[index] = (
-                before
-                or after
+                previous_script
+                or following[index]
                 or ("Arabic" if lang and lang.startswith("ar") else "Latin")
             )
+        previous_script = scripts[index]
     result: list[tuple[str, str, bool, str]] = []
-    cjk, _ = cjk_key(lang, context)
-    for cluster, name in zip(clusters, scripts):
+    buffered: list[str] = []
+    current: tuple[str, bool, str] | None = None
+    if cjk is None:
+        cjk, _ = cjk_key(lang, context)
+    for cluster, name in zip(clusters, scripts, strict=True):
         if name == "Arabic" and not all(ord(c) < 128 for c in cluster):
             key = "arabic"
         elif name in {"Han", "Hiragana", "Katakana", "Hangul"}:
@@ -145,11 +164,15 @@ def fragments(
             )
         # Numbers and Latin sequences inside Arabic must remain LTR.
         rtl = name == "Arabic" and direction(cluster) == "rtl"
-        if result and result[-1][0] == key and result[-1][2:] == (rtl, name):
-            previous = result[-1]
-            result[-1] = (key, previous[1] + cluster, rtl, name)
-        else:
-            result.append((key, cluster, rtl, name))
+        identity = (key, rtl, name)
+        if identity != current:
+            if current is not None:
+                result.append((current[0], "".join(buffered), current[1], current[2]))
+            buffered = []
+            current = identity
+        buffered.append(cluster)
+    if current is not None:
+        result.append((current[0], "".join(buffered), current[1], current[2]))
     return result
 
 
@@ -202,16 +225,35 @@ class MultilingualDocument:
         self.lang = language(lang)
         self.base_direction = base_direction
         self.runs: dict[str, RunContext] = {}
+        self._marker_prefix = "MD2D" + uuid.uuid4().hex[:12]
         self.warnings: list[dict[str, str]] = []
         self.scripts: set[str] = set()
         self.languages: set[str] = {self.lang} if self.lang else set()
         self.code_blocks: list[str] = []
         self.code_languages: dict[str, str | None] = {}
         self.math = False
+        self.limits = LimitsConfig()
         self.code_size_pt = 9
         self._role = "body"
         self._character_style: str | None = None
         self._warned: set[str] = set()
+        self._styled_runs: dict[Any, RunContext] = {}
+        self._paragraph_directions: dict[Any, str] = {}
+        self._expected_parts: dict[str, Any] = {}
+        self._cjk_contexts: dict[tuple[str | None, str], tuple[str, bool]] = {}
+
+    def _context_key(self, lang: str | None, context: str) -> tuple[str, bool]:
+        identity = (lang, context)
+        if identity not in self._cjk_contexts:
+            self._cjk_contexts[identity] = cjk_key(lang, context)
+        return self._cjk_contexts[identity]
+
+    def _fragments(
+        self, text: str, lang: str | None, context: str, *, code: bool = False
+    ) -> list[tuple[str, str, bool, str]]:
+        return fragments(
+            text, lang, context, code=code, cjk=self._context_key(lang, context)[0]
+        )
 
     def warn(self, code: str, message: str) -> None:
         if code not in self._warned:
@@ -286,17 +328,17 @@ class MultilingualDocument:
         local_dir: str | None = None,
     ) -> list[dict[str, Any]]:
         result = []
-        for key, part, rtl, name in fragments(text, lang, context, code=code):
+        for key, part, rtl, name in self._fragments(text, lang, context, code=code):
             if key == "sans" and self._role == "heading":
                 key = "heading"
             self.resolver.resolve(key, self._checked_text(part))
             self.scripts.add(name)
-            if name == "Han" and cjk_key(lang, context)[1]:
+            if name == "Han" and self._context_key(lang, context)[1]:
                 self.warn(
                     "CJK_LANGUAGE_AMBIGUOUS",
                     "Unmarked shared Han characters use Simplified Chinese glyphs; add lang spans for regional forms",
                 )
-            marker = f"MD2D{len(self.runs):06d}"
+            marker = f"{self._marker_prefix}{len(self.runs):06d}"
             self.runs[marker] = RunContext(
                 part,
                 key,
@@ -394,14 +436,14 @@ class MultilingualDocument:
             )
         if kind == "CodeBlock":
             self.code_blocks.append(content[1])
-            for key, part, _, name in fragments(
+            for key, part, _, name in self._fragments(
                 content[1], lang, content[1], code=True
             ):
                 self.resolver.resolve(key, self._checked_text(part))
                 self.scripts.add(name)
             # A code block's own attributes survive syntax highlighting via its ID.
             if not content[0][0]:
-                content[0][0] = f"MD2DCODE{len(self.code_blocks)-1}"
+                content[0][0] = f"{self._marker_prefix}CODE{len(self.code_blocks) - 1}"
             self.code_languages[content[0][0]] = lang
             return node
         if kind == "Math":
@@ -425,20 +467,49 @@ class MultilingualDocument:
 
     def apply(self, path: Path) -> dict[str, str]:
         """Apply run properties across body, footnotes and other document parts."""
+        with zipfile.ZipFile(path) as source:
+            entries = source.infolist()
+            if (
+                len(entries) > self.limits.archive_entries
+                or sum(info.file_size for info in entries) > self.limits.archive_bytes
+            ):
+                raise ValidationError(
+                    str(path), ["DOCX exceeds archive resource limits"]
+                )
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, suffix=".docx", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+            try:
+                with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as target:
+                    checks = self._apply_parts(path, source, target)
+                source.close()  # Windows cannot replace an open source archive.
+                self._verify_output(temporary)
+                os.replace(temporary, path)
+                return checks
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def _apply_parts(
+        self,
+        path: Path,
+        source_archive: zipfile.ZipFile,
+        destination_archive: zipfile.ZipFile,
+    ) -> dict[str, str]:
         observed: dict[str, str] = {}
         before: list[str] = []
         after: list[str] = []
         code_text: list[str] = []
-        with zipfile.ZipFile(path) as archive:
-            entries = [
-                (info, archive.read(info.filename)) for info in archive.infolist()
-            ]
-        updated = []
+        entries = source_archive.infolist()
         parser = etree.XMLParser(resolve_entities=False, no_network=True)
         character_styles = {}
-        for info, data in entries:
+        for info in entries:
             if info.filename == "word/styles.xml":
-                styles = etree.fromstring(data, parser)
+                if info.file_size > self.limits.xml_bytes:
+                    raise ValidationError(
+                        str(path), ["styles.xml exceeds XML resource limit"]
+                    )
+                styles = etree.fromstring(source_archive.read(info), parser)
                 for style in styles.findall(W + "style"):
                     name = style.find(W + "name")
                     if style.get(W + "type") == "character" and name is not None:
@@ -452,9 +523,13 @@ class MultilingualDocument:
             for identifier, lang in self.code_languages.items()
         }
         bookmark_languages.update(self.code_languages)
-        for info, data in entries:
+        for info in entries:
             if info.filename.startswith("word/") and info.filename.endswith(".xml"):
-                root = etree.fromstring(data, parser)
+                if info.file_size > self.limits.xml_bytes:
+                    raise ValidationError(
+                        str(path), [f"{info.filename} exceeds XML resource limit"]
+                    )
+                root = etree.fromstring(source_archive.read(info), parser)
                 if self.math:
                     for value in root.xpath("//m:t/text()", namespaces=NS):
                         self.resolver.resolve("math", self._checked_text(value))
@@ -537,9 +612,10 @@ class MultilingualDocument:
                         )
                 if info.filename == "word/styles.xml":
                     for element in list(root):
-                        if element.tag == W + "style" and element.get(
-                            W + "styleId", ""
-                        ).startswith("MD2D"):
+                        if (
+                            element.tag == W + "style"
+                            and element.get(W + "styleId", "") in self.runs
+                        ):
                             root.remove(element)
                     for props in root.iter(W + "rPr"):
                         for source, target in (
@@ -591,10 +667,30 @@ class MultilingualDocument:
                         font = etree.SubElement(math_pr, M + "mathFont")
                     font.set(M + "val", self.resolver.resolve("math").family)
                 after.extend(root.xpath("//w:t/text()", namespaces=NS))
+                self._expected_parts[info.filename] = (
+                    [
+                        (index, self._styled_runs[run])
+                        for index, run in enumerate(root.iter(W + "r"))
+                        if run in self._styled_runs
+                    ],
+                    [
+                        (index, self._paragraph_directions[paragraph])
+                        for index, paragraph in enumerate(root.iter(W + "p"))
+                        if paragraph in self._paragraph_directions
+                    ],
+                )
                 data = etree.tostring(
                     root, xml_declaration=True, encoding="UTF-8", standalone=True
                 )
-            updated.append((info, data))
+                destination_archive.writestr(info, data)
+                self._styled_runs.clear()
+                self._paragraph_directions.clear()
+            else:
+                with (
+                    source_archive.open(info) as original,
+                    destination_archive.open(info, "w") as destination,
+                ):
+                    shutil.copyfileobj(original, destination)
         failures = [
             name for name, spec in self.runs.items() if observed.get(name) != spec.text
         ]
@@ -608,9 +704,6 @@ class MultilingualDocument:
             raise ValidationError(
                 str(path), [f"Text integrity failed: {', '.join(failures[:10])}"]
             )
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for info, data in updated:
-                archive.writestr(info, data)
         return {
             "text_integrity": (
                 "partial" if "RAW_CONTENT_UNVERIFIED" in self._warned else "passed"
@@ -621,12 +714,58 @@ class MultilingualDocument:
             "language_direction": "passed",
         }
 
+    def _verify_output(self, path: Path) -> None:
+        """Check serialized output against run/paragraph expectations independently."""
+        failures = []
+        parser = etree.XMLParser(resolve_entities=False, no_network=True)
+        with zipfile.ZipFile(path) as archive:
+            for name, (
+                expected_runs,
+                expected_paragraphs,
+            ) in self._expected_parts.items():
+                root = etree.fromstring(archive.read(name), parser)
+                runs = list(root.iter(W + "r"))
+                paragraphs = list(root.iter(W + "p"))
+                for index, spec in expected_runs:
+                    props = runs[index].find(W + "rPr")
+                    family = self.resolver.resolve(spec.font).family
+                    fonts = props.find(W + "rFonts") if props is not None else None
+                    if fonts is None or any(
+                        fonts.get(W + slot) != family
+                        for slot in ("ascii", "hAnsi", "eastAsia", "cs")
+                    ):
+                        failures.append(f"{name}: font properties mismatch")
+                    for tag, expected in (
+                        ("rtl", spec.rtl),
+                        ("cs", spec.script == "Arabic"),
+                    ):
+                        element = props.find(W + tag) if props is not None else None
+                        if element is None or element.get(W + "val") != (
+                            "1" if expected else "0"
+                        ):
+                            failures.append(f"{name}: {tag} mismatch")
+                    if spec.lang:
+                        element = props.find(W + "lang") if props is not None else None
+                        if element is None or any(
+                            element.get(W + slot) != spec.lang
+                            for slot in ("val", "eastAsia", "bidi")
+                        ):
+                            failures.append(f"{name}: language mismatch")
+                for index, value in expected_paragraphs:
+                    element = paragraphs[index].find(W + "pPr/" + W + "bidi")
+                    if element is None or element.get(W + "val") != (
+                        "1" if value == "rtl" else "0"
+                    ):
+                        failures.append(f"{name}: paragraph direction mismatch")
+        if failures:
+            raise ValidationError(str(path), failures[:10])
+
     def _split_run(
         self, run: Any, text: str, *, code: bool, lang: str | None, context: str
     ) -> None:
         # Preserve non-text run children (breaks, references) by replacing only
         # simple text-only runs. Other runs keep their structure and receive fonts.
-        parts = fragments(text, lang, context, code=code)
+        parts = self._fragments(text, lang, context, code=code)
         if not parts:
             return
         for key, part, _, _ in parts:
@@ -658,6 +797,7 @@ class MultilingualDocument:
         parent.remove(run)
 
     def _properties(self, run: Any, spec: RunContext) -> None:
+        self._styled_runs[run] = spec
         props = run.find(W + "rPr")
         if props is None:
             props = etree.Element(W + "rPr")
@@ -673,7 +813,7 @@ class MultilingualDocument:
             fonts = etree.Element(W + "rFonts")
             props.insert(0, fonts)
         for attr in list(fonts.attrib):
-            if attr.endswith("Theme"):
+            if attr.lower().endswith("theme"):
                 del fonts.attrib[attr]
         for slot in ("ascii", "hAnsi", "eastAsia", "cs"):
             fonts.set(W + slot, family)
@@ -704,8 +844,8 @@ class MultilingualDocument:
             for attr in ("val", "eastAsia", "bidi"):
                 element.set(W + attr, spec.lang)
 
-    @staticmethod
-    def _paragraph(paragraph: Any, value: str) -> None:
+    def _paragraph(self, paragraph: Any, value: str) -> None:
+        self._paragraph_directions[paragraph] = value
         props = paragraph.find(W + "pPr")
         if props is None:
             props = etree.Element(W + "pPr")
