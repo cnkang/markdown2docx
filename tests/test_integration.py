@@ -3,14 +3,11 @@
 端到端集成测试，确保整个转换流程正常工作。
 """
 
-import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 from docx import Document
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from markdown2docx import DocxTemplateManager, MarkdownToDocxConverter
 from markdown2docx.exceptions import TemplateError
@@ -81,7 +78,7 @@ function testIntegration() {
 ## Block Quotes
 
 > This is a block quote with important information.
-> 
+>
 > It can span multiple paragraphs and contain **formatting**.
 
 ## Links and References
@@ -284,11 +281,11 @@ def test_large_document_conversion():
     large_content = "# Large Document Test\n\n"
 
     for i in range(100):
-        large_content += f"""## Section {i+1}
+        large_content += f"""## Section {i + 1}
 
-This is section {i+1} with some content. It contains **bold text**, *italic text*, and `inline code`.
+This is section {i + 1} with some content. It contains **bold text**, *italic text*, and `inline code`.
 
-### Subsection {i+1}.1
+### Subsection {i + 1}.1
 
 More content here with a list:
 
@@ -297,8 +294,8 @@ More content here with a list:
 - Item 3
 
 ```python
-def section_{i+1}_function():
-    return "Section {i+1} code"
+def section_{i + 1}_function():
+    return "Section {i + 1} code"
 ```
 
 """

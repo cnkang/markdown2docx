@@ -24,7 +24,7 @@ This is a comprehensive example document showcasing **multilingual** and complex
 ### Block Quotes
 
 > This is an English quote block with important information.
-> 
+>
 > 这是中文引用块，包含重要信息。
 
 > هذا اقتباس باللغة العربية يحتوي على معلومات مهمة.
@@ -60,7 +60,7 @@ This is a comprehensive example document showcasing **multilingual** and complex
 ### Multilingual Ordered Lists
 
 1. **First Step** - Initialize converter (初始化转换器)
-2. **Second Step** - Configure options (配置选项)  
+2. **Second Step** - Configure options (配置选项)
 3. **Third Step** - Execute conversion (执行转换 / Ejecutar conversión)
 4. **Fourth Step** - Verify results (验证结果 / Vérifier les résultats)
 5. **Fifth Step** - Complete processing (完成处理 / Завершить обработку)
@@ -90,15 +90,15 @@ def convert_multilingual_markdown(input_file, output_file, languages=None):
     """
     if languages is None:
         languages = ['en', 'zh', 'es', 'fr', 'ru', 'ja', 'ar']
-    
+
     converter = MarkdownToDocxConverter()
-    
+
     # English comment: Set language support
     # 中文注释：设置语言支持
     # Comentario en español: Configurar soporte de idiomas
     for lang in languages:
         converter.add_language_support(lang)
-    
+
     return converter.convert(input_file, output_file)
 
 # Usage example (使用示例)
@@ -134,7 +134,7 @@ function processMultilingualText(text, language) {
 
 ```sql
 -- Multilingual database query example (多语言数据库查询示例)
-SELECT 
+SELECT
     id,
     title_en AS 'English Title',
     title_zh AS 'Chinese Title (中文标题)',
@@ -143,7 +143,7 @@ SELECT
     title_ru AS 'Russian Title (Русский заголовок)',
     title_ja AS 'Japanese Title (日本語タイトル)',
     title_ar AS 'Arabic Title (العنوان العربي)'
-FROM multilingual_documents 
+FROM multilingual_documents
 WHERE status = 'published'
 ORDER BY created_date DESC;
 ```

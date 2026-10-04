@@ -3,15 +3,11 @@
 模板系统测试，确保DOCX模板创建和使用功能正常。
 """
 
-import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 from docx import Document
-from docx.enum.style import WD_STYLE_TYPE
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from markdown2docx.converter import MarkdownToDocxConverter
 from markdown2docx.exceptions import TemplateError
