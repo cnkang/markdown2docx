@@ -3,7 +3,6 @@
 import hashlib
 import io
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import pytest
 
@@ -130,3 +129,61 @@ def test_concurrent_downloads_publish_identical_bytes(resolver):
         hashes = list(pool.map(acquire, range(4)))
     assert len(set(hashes)) == 1
     assert (resolver.cache / "test.ttf").read_bytes() == b"verified test font"
+
+
+def test_font_metadata_invalidates_when_file_is_replaced(tmp_path, monkeypatch):
+    from markdown2docx import fonts
+
+    class FakeFont:
+        def __init__(self, path, **kwargs):
+            self.value = path.read_text()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def __getitem__(self, key):
+            return self
+
+        def getDebugName(self, number):
+            return self.value
+
+        def getBestCmap(self):
+            return {ord(self.value[0]): "glyph"}
+
+    monkeypatch.setattr(fonts, "TTFont", FakeFont)
+    fonts._font_info.cache_clear()
+    path = tmp_path / "font.ttf"
+    path.write_text("first")
+    assert fonts.font_info(path)[0] == "first"
+    replacement = tmp_path / "replacement.ttf"
+    replacement.write_text("second")
+    replacement.replace(path)
+    assert fonts.font_info(path)[0] == "second"
+    assert fonts.font_info(path)[1] == {ord("s")}
+
+
+def test_explicit_font_refresh_drops_discovery_and_selection(resolver):
+    resolver.resolve("sans")
+    resolver.installed = {"Stale": []}
+    resolver.refresh()
+    assert not resolver.selected
+    assert "installed" not in resolver.__dict__
+
+
+def test_refresh_reaudits_custom_aliases(resolver, monkeypatch):
+    resolver.cache.mkdir()
+    path = resolver.cache / "unknown.ttf"
+    path.write_bytes(b"installed custom font")
+    installed = {"Unknown": [path]}
+    resolver.installed = installed
+    resolver.aliases["sans"] = resolver.audit_family("Unknown", allow_unverified=True)
+    monkeypatch.setattr("markdown2docx.fonts._discover", lambda directories: installed)
+    # This callable intentionally exposes the cache protocol used by refresh.
+    monkeypatch.setattr(
+        "markdown2docx.fonts._discover.cache_clear", lambda: None, raising=False
+    )
+    resolver.refresh()
+    assert resolver.resolve("sans", "abc").family == "Unknown"

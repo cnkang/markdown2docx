@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import platform
 import tempfile
@@ -65,8 +66,19 @@ def system_font_directories() -> list[Path]:
     ]
 
 
-@lru_cache(maxsize=256)
 def font_info(path: Path) -> tuple[str, set[int]]:
+    """Invalidate metadata when an installed font at the same path changes."""
+    stat = path.stat()
+    family, coverage = _font_info(
+        path, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino
+    )
+    return family, set(coverage)
+
+
+@lru_cache(maxsize=256)
+def _font_info(
+    path: Path, mtime: int, ctime: int, size: int, inode: int
+) -> tuple[str, set[int]]:
     """Read a static font's preferred family name and Unicode cmap."""
     with TTFont(path, lazy=True) as font:
         name = font["name"].getDebugName(16) or font["name"].getDebugName(1)
@@ -90,6 +102,9 @@ def _discover(directories: tuple[Path, ...]) -> dict[str, list[Path]]:
                 if family:
                     result.setdefault(family, []).append(path)
             except Exception:
+                logging.getLogger(__name__).debug(
+                    "Skipping unreadable font: %s", path, exc_info=True
+                )
                 continue
     return result
 
@@ -143,6 +158,18 @@ class FontResolver:
         self.selected: dict[str, FontSelection] = {}
         self.aliases: dict[str, str] = {"heading": "sans"}
 
+    def refresh(self) -> None:
+        """Refresh discovery and metadata after font installation or replacement."""
+        self.__dict__.pop("installed", None)
+        _discover.cache_clear()
+        _font_info.cache_clear()
+        self.selected.clear()
+        for role, key in list(self.aliases.items()):
+            if key.startswith("custom:"):
+                self.aliases[role] = self.audit_family(
+                    key.removeprefix("custom:"), allow_unverified=True
+                )
+
     @cached_property
     def installed(self) -> dict[str, list[Path]]:
         return _discover(tuple(self.directories))
@@ -151,10 +178,13 @@ class FontResolver:
         """Verify bytes before atomic publication; a failed fetch leaves no entry."""
         temporary: Path | None = None
         try:
+            if not url.startswith("https://"):
+                raise FontError("FONT_DOWNLOAD_FAILED", "Font sources must use HTTPS")
             request = urllib.request.Request(
                 url, headers={"User-Agent": "markdown2docx/0.2"}
             )
-            with urllib.request.urlopen(request, timeout=60) as response:
+            # HTTPS manifest source; checksum verified
+            with urllib.request.urlopen(request, timeout=60) as response:  # nosec B310
                 with tempfile.NamedTemporaryFile(
                     dir=self.cache, delete=False
                 ) as stream:
