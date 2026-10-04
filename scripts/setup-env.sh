@@ -15,12 +15,12 @@ uv sync "$@"
 # Ensure pandoc is installed
 if ! command -v pandoc >/dev/null 2>&1; then
   echo "Pandoc not found. Attempting to install..."
-  
+
   # Check if sudo is available for package managers that need it
   has_sudo() {
     command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null
   }
-  
+
   if brew_bin="$(command -v brew)"; then
     "$brew_bin" install pandoc || { echo "Failed to install pandoc using brew"; exit 1; }
   elif apt_get_bin="$(command -v apt-get)"; then

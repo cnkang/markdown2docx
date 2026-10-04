@@ -1,7 +1,5 @@
 """Tests for custom exceptions in markdown2docx package."""
 
-import pytest
-
 from markdown2docx.exceptions import (
     ConfigurationError,
     ConversionError,
@@ -61,7 +59,7 @@ class TestPandocError:
         error = PandocError(
             "Pandoc failed",
             pandoc_version="2.19.2",
-            command="pandoc -f markdown -t docx"
+            command="pandoc -f markdown -t docx",
         )
         expected = (
             "Pandoc failed\n"
@@ -95,11 +93,11 @@ class TestConversionError:
         """Test ConversionError with original exception."""
         original = ValueError("Invalid input")
         error = ConversionError("test.md", "Conversion failed", original)
-        
+
         assert error.message == "Conversion failed"
         assert error.input_file == "test.md"
         assert error.original_error is original
-        
+
         error_str = str(error)
         assert "Input file: test.md" in error_str
         assert "Original error: ValueError: Invalid input" in error_str
@@ -130,11 +128,11 @@ class TestValidationError:
         """Test ValidationError creation."""
         validation_errors = ["Missing required style", "Invalid structure"]
         error = ValidationError("output.docx", validation_errors)
-        
+
         assert error.message == "DOCX validation failed for output.docx"
         assert error.output_file == "output.docx"
         assert error.validation_errors == validation_errors
-        
+
         error_str = str(error)
         assert "DOCX validation failed for output.docx" in error_str
         assert "Missing required style" in error_str
@@ -177,7 +175,7 @@ class TestExceptionInheritance:
             ValidationError("test.docx", ["test"]),
             ConfigurationError("test", "test"),
         ]
-        
+
         for exc in exceptions:
             assert isinstance(exc, MarkdownToDocxError)
             assert isinstance(exc, Exception)

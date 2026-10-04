@@ -3,14 +3,11 @@
 DOCX样式处理测试，确保Markdown标题正确映射到Word标题样式。
 """
 
-import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 from docx import Document
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from markdown2docx.converter import MarkdownToDocxConverter
 from markdown2docx.templates import DocxTemplateManager
