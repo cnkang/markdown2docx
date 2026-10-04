@@ -222,6 +222,7 @@ def test_quiet_cli_has_no_success_or_info_output(tmp_path, mode):
         capture_output=True,
         text=True,
         check=False,
+        timeout=300,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
@@ -319,6 +320,7 @@ def test_unwritable_log_file_emits_structured_configuration_error(tmp_path):
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     )
     assert result.returncode == 1
     assert json.loads(result.stdout)["error"]["code"] == "INVALID_ARGUMENT"
