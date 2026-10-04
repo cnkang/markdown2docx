@@ -1,0 +1,88 @@
+name: Publish distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Approved publishing environment (configure Trusted Publishing first)
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+      release_ref:
+        description: Reviewed immutable release tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require a release tag
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+          RUN_REF: ${{ github.ref_name }}
+          RUN_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [[ ! "$RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a vX.Y.Z release tag"
+            exit 1
+          fi
+          if [ "$RUN_REF_TYPE" != "tag" ] || [ "$RUN_REF" != "$RELEASE_REF" ]; then
+            echo "Dispatch this workflow on the reviewed release tag itself"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: "0.12.23"
+      - run: uv sync --locked --group dev --group test
+      - run: make quality
+      - run: uv run --locked python scripts/install_pandoc.py --github-env
+      - run: uv run --locked python scripts/prepare_fonts.py
+      - run: uv run --locked pytest
+      - run: uv run --locked python scripts/validate_multilingual.py --offline --output-dir artifacts/multilingual
+      - run: uv build
+      - name: Verify tag version and installed package
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
+        run: |
+          uv run --locked python -c 'import os; from markdown2docx import __version__; assert os.environ["RELEASE_REF"] == "v" + __version__'
+          uv venv artifacts/wheel-env --python 3.14
+          uv pip install --python artifacts/wheel-env/bin/python dist/*.whl
+          uv run --locked python scripts/validate_wheel.py --python artifacts/wheel-env/bin/python
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: distribution
+          path: dist/
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ${{ inputs.repository }}
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: distribution
+          path: dist/
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/*
+      - name: Publish to TestPyPI
+        if: inputs.repository == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          repository-url: https://test.pypi.org/legacy/
+      - name: Publish to PyPI
+        if: inputs.repository == 'pypi'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33

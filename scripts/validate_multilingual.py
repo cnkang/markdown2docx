@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Convert the acceptance fixture and retain reviewable artifacts."""
 
 from __future__ import annotations
@@ -7,7 +6,9 @@ import argparse
 import json
 import re
 import shutil
-import subprocess
+
+# trusted pdffonts executable
+import subprocess  # nosec B404
 import zipfile
 from pathlib import Path
 
@@ -40,16 +41,20 @@ def main() -> None:
         .to_dict()
     )
     required = {"zh-Hans", "zh-Hant", "ja", "ko", "en", "fr", "es", "ru", "ar"}
-    assert required <= set(report["languages"]), "A supported language is missing"
-    assert all(
-        report["checks"][key] == "passed"
-        for key in (
-            "structure",
-            "text_integrity",
-            "font_coverage",
-            "language_direction",
+    if not required <= set(report["languages"]):
+        raise RuntimeError("A supported language is missing")
+    if not all(
+        (
+            report["checks"][key] == "passed"
+            for key in (
+                "structure",
+                "text_integrity",
+                "font_coverage",
+                "language_direction",
+            )
         )
-    ), report["checks"]
+    ):
+        raise RuntimeError(report["checks"])
     with zipfile.ZipFile(report["output_path"]) as archive:
         root = etree.fromstring(archive.read("word/document.xml"))
         expected = {
@@ -61,19 +66,25 @@ def main() -> None:
             "Noto Sans CJK KR",
         }
         cells = root.xpath("//w:tc", namespaces=NS)
-        assert any(
-            expected <= set(cell.xpath(".//w:rFonts/@w:ascii", namespaces=NS))
-            for cell in cells
-        ), "Mixed-language table cell lost its fonts"
-        assert root.xpath(
-            "//w:pPr/w:bidi[@w:val='1']", namespaces=NS
-        ), "RTL paragraph missing"
+        if not any(
+            (
+                expected <= set(cell.xpath(".//w:rFonts/@w:ascii", namespaces=NS))
+                for cell in cells
+            )
+        ):
+            raise RuntimeError("Mixed-language table cell lost its fonts")
+        if not root.xpath("//w:pPr/w:bidi[@w:val='1']", namespaces=NS):
+            raise RuntimeError("RTL paragraph missing")
     if args.render:
-        assert report["preview"]["status"] == "rendered", report["preview"]
-        assert report["preview"]["pages"], "Page previews are missing"
+        if not report["preview"]["status"] == "rendered":
+            raise RuntimeError(report["preview"])
+        if not report["preview"]["pages"]:
+            raise RuntimeError("Page previews are missing")
         binary = shutil.which("pdffonts")
-        assert binary, "pdffonts is required for CI rendering checks"
-        result = subprocess.run(
+        if not binary:
+            raise RuntimeError("pdffonts is required for CI rendering checks")
+        # trusted pdffonts argv, no shell
+        result = subprocess.run(  # nosec B603
             [binary, report["preview"]["pdf"]],
             capture_output=True,
             text=True,
@@ -85,17 +96,18 @@ def main() -> None:
             if not line.strip():
                 continue
             name = line.split()[0].split("+")[-1]
-            normalized = re.sub(r"[^a-z0-9]", "", name.lower())
-            normalized = re.sub(r"(?:regular|bolditalic|bold|italic)$", "", normalized)
+            normalized = re.sub("[^a-z0-9]", "", name.lower())
+            normalized = re.sub("(?:regular|bolditalic|bold|italic)$", "", normalized)
             used.add(normalized)
         missing = [
             family
             for family in expected
-            if re.sub(r"[^a-z0-9]", "", family.lower()) not in used
+            if re.sub("[^a-z0-9]", "", family.lower()) not in used
         ]
-        assert (
-            not missing
-        ), f"Renderer substituted or omitted expected fonts: {missing}; actual: {sorted(used)}"
+        if not not missing:
+            raise RuntimeError(
+                f"Renderer substituted or omitted expected fonts: {missing}; actual: {sorted(used)}"
+            )
         report["checks"]["rendered_fonts"] = "passed"
         report["checks"]["visual_review"] = "required"
     (args.output_dir / "report.json").write_text(
