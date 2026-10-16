@@ -47,7 +47,7 @@ dev = [
     "ruff>=0.16.10",
     "hypothesis>=6.169.0",
     "jsonschema>=4.26.0",
-    "types-jsonschema>=4.26.0.20260518",
+    "types-jsonschema>=4.26.0.20261006",
     "bandit>=1.9.4",
     "pre-commit-hooks>=6.0.0",
 ]
