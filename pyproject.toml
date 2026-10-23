@@ -52,7 +52,7 @@ dev = [
     "pre-commit-hooks>=6.0.0",
 ]
 docs = [
-    "sphinx>=7.0.0",
+    "sphinx>=9.1.1",
     "sphinx-rtd-theme>=2.0.0",
     "myst-parser>=5.1.0",
 ]
