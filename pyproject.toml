@@ -25,7 +25,7 @@ dependencies = [
     "packaging>=26.3",  # For version comparison
     "pyyaml>=6.0.2",  # For YAML config file support
     "fonttools>=4.68.0",
-    "regex>=2025.9.18",
+    "regex>=2026.11.9",
     "filelock>=4.2.10",
     "langcodes>=3.5",
 ]
