@@ -54,7 +54,7 @@ dev = [
 docs = [
     "sphinx>=9.2.0",
     "sphinx-rtd-theme>=2.0.0",
-    "myst-parser>=5.1.0",
+    "myst-parser>=5.2.0",
 ]
 test = [
     "pytest>=9.2.0",
