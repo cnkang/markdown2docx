@@ -29,21 +29,51 @@ def parts(path):
         }
 
 
-def direction_runs(paragraph):
-    result = []
+BIDI_CONTROLS = "\u2066\u2067\u2069"
+
+
+def paragraph_text(paragraph):
+    return "".join(paragraph.xpath(".//w:t/text()", namespaces=NS))
+
+
+def bidi_scopes(paragraph):
+    """Group logical text by isolate scope and serialized run direction."""
+    scopes = [[]]
     for run in paragraph.iter(W + "r"):
         text = "".join(run.xpath("./w:t/text()", namespaces=NS))
-        if not text.strip():
+        if not text:
             continue
         rtl = run.find(W + "rPr/" + W + "rtl")
         cs = run.find(W + "rPr/" + W + "cs")
-        result.append(
-            (
-                text,
-                rtl.get(W + "val") if rtl is not None else None,
-                cs.get(W + "val") if cs is not None else None,
-            )
+        direction = (
+            rtl.get(W + "val") if rtl is not None else None,
+            cs.get(W + "val") if cs is not None else None,
         )
+        buffered = []
+        for char in text:
+            if char in BIDI_CONTROLS:
+                if buffered:
+                    scopes[-1].append(("".join(buffered), *direction))
+                    buffered = []
+                scopes.append([])
+            else:
+                buffered.append(char)
+        if buffered:
+            scopes[-1].append(("".join(buffered), *direction))
+
+    result = []
+    for scope in scopes:
+        merged = []
+        for text, rtl, cs in scope:
+            if merged and merged[-1][1:] == (rtl, cs):
+                merged[-1] = (merged[-1][0] + text, rtl, cs)
+            else:
+                merged.append((text, rtl, cs))
+        fragments = [
+            (text.strip(), rtl, cs) for text, rtl, cs in merged if text.strip()
+        ]
+        if fragments:
+            result.append(fragments)
     return result
 
 
@@ -218,59 +248,91 @@ def test_direction_auto_ignores_inline_code(tmp_path):
             assert run.find(W + "rPr/" + W + "rtl").get(W + "val") == "0"
 
 
-def test_explicit_local_rtl_overrides_latin_script_direction(tmp_path):
+def test_explicit_local_rtl_isolates_latin_without_forcing_run_rtl(tmp_path):
     source = tmp_path / "direction.md"
     source.write_text("[ABC]{dir=rtl}\n", encoding="utf-8")
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="en", offline=True
+    )
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
+    assert paragraph_text(paragraph) == "\u2067ABC\u2069"
+    assert bidi_scopes(paragraph) == [[("ABC", "0", "0")]]
+
+
+def test_explicit_local_ltr_isolates_latin_in_arabic_paragraph(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text("العربية [ABC 123.]{dir=ltr} العربية\n", encoding="utf-8")
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="ar", offline=True
+    )
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
+    assert paragraph_text(paragraph) == "العربية \u2066ABC 123.\u2069 العربية"
+    assert bidi_scopes(paragraph) == [
+        [("العربية", "1", "1")],
+        [("ABC", "0", "0"), ("123.", "0", "1")],
+        [("العربية", "1", "1")],
+    ]
+
+
+def test_explicit_local_rtl_isolates_digits_without_forcing_run_rtl(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text("العربية [123.,!]{dir=rtl} العربية\n", encoding="utf-8")
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="ar", offline=True
+    )
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
+    assert paragraph_text(paragraph) == "العربية \u2067123.,!\u2069 العربية"
+    assert bidi_scopes(paragraph) == [
+        [("العربية", "1", "1")],
+        [("123.,!", "0", "1")],
+        [("العربية", "1", "1")],
+    ]
+
+
+def test_explicit_span_isolate_wraps_spaces_and_soft_breaks(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text("[ABC DEF]{dir=rtl} [GHI\nJKL]{dir=rtl}\n", encoding="utf-8")
     output = MarkdownToDocxConverter().convert(source, lang="en", offline=True)
     paragraph = parts(output)["word/document.xml"].find(W + "body/" + W + "p")
 
-    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
-    assert paragraph.xpath(".//w:t/text()", namespaces=NS) == ["ABC"]
-    assert direction_runs(paragraph) == [("ABC", "1", "0")]
+    assert paragraph_text(paragraph) == ("\u2067ABC DEF\u2069 \u2067GHI JKL\u2069")
+    assert bidi_scopes(paragraph) == [
+        [("ABC DEF", "0", "0")],
+        [("GHI JKL", "0", "0")],
+    ]
 
 
-def test_explicit_local_ltr_overrides_arabic_paragraph_direction(tmp_path):
+def test_inline_code_uses_ltr_isolate_without_overriding_strong_script(tmp_path):
     source = tmp_path / "direction.md"
-    source.write_text("العربية [ABC 123.]{dir=ltr} العربية\n", encoding="utf-8")
-    output = MarkdownToDocxConverter().convert(source, lang="ar", offline=True)
-    paragraph = parts(output)["word/document.xml"].find(W + "body/" + W + "p")
+    source.write_text("العربية `ABC العربية 123` العربية\n", encoding="utf-8")
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="ar", offline=True
+    )
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
 
-    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
-    assert paragraph.xpath(".//w:t/text()", namespaces=NS) == [
-        "العربية",
-        " ",
-        "ABC",
-        " ",
-        "123.",
-        " ",
-        "العربية",
-    ]
-    assert direction_runs(paragraph) == [
-        ("العربية", "1", "1"),
-        ("ABC", "0", "0"),
-        ("123.", "0", "1"),
-        ("العربية", "1", "1"),
-    ]
-
-
-def test_explicit_local_rtl_applies_to_digits_and_punctuation(tmp_path):
-    source = tmp_path / "direction.md"
-    source.write_text("العربية [123.,!]{dir=rtl} العربية\n", encoding="utf-8")
-    output = MarkdownToDocxConverter().convert(source, lang="ar", offline=True)
-    paragraph = parts(output)["word/document.xml"].find(W + "body/" + W + "p")
-
-    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
-    assert paragraph.xpath(".//w:t/text()", namespaces=NS) == [
-        "العربية",
-        " ",
-        "123.,!",
-        " ",
-        "العربية",
-    ]
-    assert direction_runs(paragraph) == [
-        ("العربية", "1", "1"),
-        ("123.,!", "1", "1"),
-        ("العربية", "1", "1"),
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    assert paragraph_text(paragraph) == ("العربية \u2066ABC العربية 123\u2069 العربية")
+    assert bidi_scopes(paragraph) == [
+        [("العربية", "1", "1")],
+        [("ABC", "0", "0"), ("العربية", "1", "1"), ("123", "0", "1")],
+        [("العربية", "1", "1")],
     ]
 
 
@@ -289,26 +351,122 @@ def test_nested_span_and_div_directions_are_inherited_and_restored(tmp_path):
         paragraph.find(W + "pPr/" + W + "bidi").get(W + "val")
         for paragraph in paragraphs
     ] == ["0", "1", "0"]
+    assert [paragraph_text(paragraph) for paragraph in paragraphs] == [
+        "\u2067outer \u2066inner\u2069 tail\u2069",
+        "\u2066ABC\u2069",
+        "\u2067DEF\u2069",
+    ]
+    assert [bidi_scopes(paragraph) for paragraph in paragraphs] == [
+        [[("outer", "0", "0")], [("inner", "0", "0")], [("tail", "0", "0")]],
+        [[("ABC", "0", "0")]],
+        [[("DEF", "0", "0")]],
+    ]
+
+
+def test_note_boundary_resets_outer_span_direction(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text(
+        "[outer[^note]]{dir=rtl}\n\n[^note]: Latin footnote\n", encoding="utf-8"
+    )
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="en", offline=True
+    )
+    roots = parts(report.output_path)
+    paragraph = roots["word/document.xml"].find(W + "body/" + W + "p")
+    footnote = next(
+        item
+        for item in roots["word/footnotes.xml"].iter(W + "p")
+        if "Latin footnote" in paragraph_text(item)
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    assert paragraph_text(paragraph) == "\u2067outer\u2069"
+    assert bidi_scopes(paragraph) == [[("outer", "0", "0")]]
+    assert paragraph_text(footnote).strip() == "Latin footnote"
+    assert footnote.find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
+    assert bidi_scopes(footnote) == [[("Latin footnote", "0", "0")]]
+
+
+def test_table_footnote_and_inline_code_keep_isolated_direction(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text(
+        "| [ABC]{dir=rtl} | `العربية 123` |\n"
+        "|---|---|\n"
+        "| [note[^n]]{dir=rtl} | plain |\n\n"
+        "[^n]: Footnote Latin\n",
+        encoding="utf-8",
+    )
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="ar", offline=True
+    )
+    roots = parts(report.output_path)
+    paragraphs = roots["word/document.xml"].xpath("//w:tbl//w:p", namespaces=NS)
+    footnote = next(
+        item
+        for item in roots["word/footnotes.xml"].iter(W + "p")
+        if "Footnote Latin" in paragraph_text(item)
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    assert [paragraph_text(paragraph) for paragraph in paragraphs] == [
+        "\u2067ABC\u2069",
+        "\u2066العربية 123\u2069",
+        "\u2067note\u2069",
+        "plain",
+    ]
     assert [
-        paragraph.xpath(".//w:t/text()", namespaces=NS) for paragraph in paragraphs
-    ] == [
-        ["outer", " ", "inner", " ", "tail"],
-        ["ABC"],
-        ["DEF"],
+        paragraph.find(W + "pPr/" + W + "bidi").get(W + "val")
+        for paragraph in paragraphs
+    ] == ["0", "0", "0", "0"]
+    assert [bidi_scopes(paragraph) for paragraph in paragraphs] == [
+        [[("ABC", "0", "0")]],
+        [[("العربية", "1", "1"), ("123", "0", "1")]],
+        [[("note", "0", "0")]],
+        [[("plain", "0", "0")]],
     ]
-    assert [direction_runs(paragraph) for paragraph in paragraphs] == [
-        [("outer", "1", "0"), ("inner", "0", "0"), ("tail", "1", "0")],
-        [("ABC", "0", "0")],
-        [("DEF", "1", "0")],
-    ]
+    assert paragraph_text(footnote).strip() == "Footnote Latin"
+    assert footnote.find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
+    assert bidi_scopes(footnote) == [[("Footnote", "0", "0"), ("Latin", "0", "0")]]
+
+
+def test_verify_output_rejects_removed_direction_isolates(tmp_path, monkeypatch):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    source = tmp_path / "direction.md"
+    source.write_text("[ABC]{dir=rtl}\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    output.write_bytes(b"original")
+    verify = MultilingualDocument._verify_output
+    remove_controls = {ord(char): None for char in BIDI_CONTROLS}
+
+    def remove_isolates_then_verify(self, candidate):
+        def remove(root):
+            for node in root.xpath("//w:t", namespaces=NS):
+                node.text = (node.text or "").translate(remove_controls)
+
+        rewrite_docx(candidate, {"word/document.xml": remove})
+        verify(self, candidate)
+
+    monkeypatch.setattr(
+        MultilingualDocument, "_verify_output", remove_isolates_then_verify
+    )
+    with pytest.raises(ValidationError) as error:
+        MarkdownToDocxConverter().convert(source, output, lang="en", offline=True)
+    assert output.read_bytes() == b"original"
+    assert any(
+        "text structure mismatch" in message or "run stream count mismatch" in message
+        for message in error.value.validation_errors
+    )
 
 
 @pytest.mark.parametrize(
     "corruption", ["rtl", "bidi"], ids=["run-direction", "paragraph-direction"]
 )
-def test_verify_output_rejects_corrupted_explicit_direction(
+def test_verify_output_rejects_corrupted_strong_script_direction(
     tmp_path, monkeypatch, corruption
 ):
+    from xml.sax.saxutils import escape
+
     from markdown2docx.multilingual import MultilingualDocument
 
     document = MultilingualDocument(
@@ -327,7 +485,7 @@ def test_verify_output_rejects_corrupted_explicit_direction(
                                         "t": "Span",
                                         "c": [
                                             ["", [], [["dir", "rtl"]]],
-                                            [{"t": "Str", "c": "ABC"}],
+                                            [{"t": "Str", "c": "العربية"}],
                                         ],
                                     }
                                 ],
@@ -338,14 +496,15 @@ def test_verify_output_rejects_corrupted_explicit_direction(
             ],
         },
         FontResolver(),
-        lang="en",
+        lang="ar",
     )
     document.annotate()
-    marker = next(iter(document.runs))
-    path = generated_docx(
-        tmp_path,
-        f'<w:r><w:rPr><w:rStyle w:val="{marker}"/></w:rPr><w:t>ABC</w:t></w:r>',
+    paragraph = "".join(
+        f'<w:r><w:rPr><w:rStyle w:val="{marker}"/></w:rPr>'
+        f"<w:t>{escape(spec.text)}</w:t></w:r>"
+        for marker, spec in document.runs.items()
     )
+    path = generated_docx(tmp_path, paragraph)
     original = path.read_bytes()
     if corruption == "rtl":
         properties = document._properties
