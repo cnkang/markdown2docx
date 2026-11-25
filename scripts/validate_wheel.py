@@ -14,8 +14,10 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+import unicodedata
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from email.parser import BytesParser
 from email.policy import default
@@ -28,6 +30,13 @@ REQUIRES_PYTHON = ">=3.14"
 LICENSE_EXPRESSION = "MIT"
 BUILD_REQUIRES = ["hatchling==1.33.0"]
 BUILD_BACKEND = "hatchling.build"
+MAX_SDIST_MEMBERS = 10_000
+MAX_SDIST_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 REQUIRED_PACKAGE_FILES = (
     "__init__.py",
     "cli.py",
@@ -119,6 +128,67 @@ def _safe_member_name(name: str) -> PurePosixPath:
     return PurePosixPath(normalized)
 
 
+def _sdist_member_path(name: str) -> PurePosixPath:
+    path = _safe_member_name(name)
+    for part in path.parts:
+        if part.endswith((" ", ".")):
+            raise DistributionError(
+                f"Unsafe Windows trailing space or dot in sdist member: {name!r}"
+            )
+        if ":" in part:
+            raise DistributionError(f"Unsafe Windows colon in sdist member: {name!r}")
+        device_name = part.split(".", 1)[0].upper()
+        if device_name in WINDOWS_DEVICE_NAMES:
+            raise DistributionError(
+                f"Unsafe Windows reserved device name in sdist member: {name!r}"
+            )
+    return path
+
+
+def _validate_sdist_members(members: Sequence[tarfile.TarInfo]) -> None:
+    if len(members) > MAX_SDIST_MEMBERS:
+        raise DistributionError(
+            f"Sdist exceeds the entry count limit: {len(members)} > {MAX_SDIST_MEMBERS}"
+        )
+    total_size = 0
+    identities = {}
+    normalized_names = {}
+    for member in members:
+        path = _sdist_member_path(member.name)
+        identity = str(path)
+        if identity in identities:
+            raise DistributionError(f"Duplicate sdist member path: {member.name}")
+        if not (member.isfile() or member.isdir()):
+            raise DistributionError(f"Unsafe sdist member type: {member.name}")
+        if member.size < 0:
+            raise DistributionError(f"Unsafe negative sdist member size: {member.name}")
+        if member.isfile():
+            total_size += member.size
+        identities[identity] = member
+        normalized = unicodedata.normalize("NFC", identity).casefold()
+        if normalized in normalized_names:
+            raise DistributionError(
+                "Sdist member collision after casefold/NFC normalization: "
+                f"{normalized_names[normalized]!r} and {identity!r}"
+            )
+        normalized_names[normalized] = identity
+    if total_size > MAX_SDIST_UNCOMPRESSED_BYTES:
+        raise DistributionError(
+            "Sdist exceeds the total uncompressed size limit: "
+            f"{total_size} > {MAX_SDIST_UNCOMPRESSED_BYTES}"
+        )
+    for normalized in normalized_names:
+        parts = normalized.split("/")
+        for index in range(1, len(parts)):
+            parent = "/".join(parts[:index])
+            original_parent = normalized_names.get(parent)
+            if original_parent is not None and not identities[original_parent].isdir():
+                raise DistributionError(
+                    "Sdist file/directory collision: "
+                    f"{original_parent!r} and {normalized_names[normalized]!r}"
+                )
+
+
 def _reject_unwanted_members(names: Sequence[str], *, wheel: bool) -> None:
     forbidden_parts = {
         "__pycache__",
@@ -174,20 +244,13 @@ def _read_sdist(path: Path) -> dict[str, bytes]:
     if not path.name.endswith(".tar.gz"):
         raise DistributionError(f"Expected a .tar.gz sdist artifact: {path}")
     files = {}
-    seen = set()
     try:
         with tarfile.open(path, "r:gz") as archive:
-            for member in archive.getmembers():
-                _safe_member_name(member.name)
-                identity = member.name.rstrip("/")
-                if identity in seen:
-                    raise DistributionError(
-                        f"Duplicate sdist member path: {member.name}"
-                    )
-                seen.add(identity)
-                if not (member.isfile() or member.isdir()):
-                    raise DistributionError(f"Unsafe sdist member type: {member.name}")
+            members = archive.getmembers()
+            _validate_sdist_members(members)
+            for member in members:
                 if member.isfile():
+                    identity = str(_sdist_member_path(member.name))
                     source = archive.extractfile(member)
                     if source is None:
                         raise DistributionError(
@@ -418,23 +481,53 @@ def validate_sdist(path: Path, expected_version: str) -> SdistInfo:
     return SdistInfo(path=path, version=expected_version)
 
 
+def _sdist_target(root: Path, member_name: str) -> Path:
+    relative = _sdist_member_path(member_name).parts[1:]
+    target = root.joinpath(*relative)
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise DistributionError(
+            f"Sdist extraction target resolves outside its root: {member_name!r}"
+        )
+    return target
+
+
 def extract_sdist(path: Path, destination: Path) -> Path:
-    """Extract only validated regular files beneath the archive's single root."""
-    files = _read_sdist(path)
-    roots = {PurePosixPath(name).parts[0] for name in files}
-    if len(roots) != 1:
-        raise DistributionError("Sdist must contain exactly one project root")
-    root_name = roots.pop()
+    """Safely extract a bounded sdist beneath its single resolved project root."""
+    _require_artifact(path, "sdist")
+    if not path.name.endswith(".tar.gz"):
+        raise DistributionError(f"Expected a .tar.gz sdist artifact: {path}")
     destination = Path(destination)
-    root = destination / root_name
-    if root.exists():
-        raise DistributionError(f"Sdist extraction destination already exists: {root}")
-    destination.mkdir(parents=True, exist_ok=True)
-    for name, data in files.items():
-        relative = PurePosixPath(name).parts[1:]
-        target = root.joinpath(*relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            members = archive.getmembers()
+            _validate_sdist_members(members)
+            roots = {_sdist_member_path(member.name).parts[0] for member in members}
+            if len(roots) != 1:
+                raise DistributionError("Sdist must contain exactly one project root")
+            root = destination / roots.pop()
+            if root.exists() or root.is_symlink():
+                raise DistributionError(
+                    f"Sdist extraction destination already exists: {root}"
+                )
+            destination.mkdir(parents=True, exist_ok=True)
+            if root.resolve().parent != destination.resolve():
+                raise DistributionError(
+                    f"Sdist extraction root resolves outside its destination: {root}"
+                )
+            for member in members:
+                _sdist_target(root, member.name)
+            # Members are bounded and tarfile's data filter rejects unsafe metadata.
+            archive.extractall(  # nosec B202
+                path=destination, filter=tarfile.data_filter
+            )
+            if not root.is_dir() or root.is_symlink():
+                raise DistributionError(f"Sdist extraction root is invalid: {root}")
+            for member in members:
+                _sdist_target(root, member.name)
+    except DistributionError:
+        raise
+    except (EOFError, OSError, tarfile.TarError) as error:
+        raise DistributionError(f"Invalid sdist archive {path}: {error}") from error
     return root
 
 
@@ -684,7 +777,30 @@ def install_and_smoke(
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+@dataclass(frozen=True)
+class DistributionDependencies:
+    """External operations injected into main for deterministic orchestration tests."""
+
+    validate_distribution_directory: Callable[[Path, str], DistributionArtifacts] = (
+        validate_distribution_directory
+    )
+    find_uv: Callable[[str], str | None] = shutil.which
+    temporary_directory: Callable[..., AbstractContextManager[str]] = (
+        tempfile.TemporaryDirectory
+    )
+    install_and_smoke: Callable[..., None] = install_and_smoke
+    extract_sdist: Callable[[Path, Path], Path] = extract_sdist
+    run: Callable[..., subprocess.CompletedProcess[str]] = _run
+    select_artifact: Callable[[Path, str, str], Path] = _select_artifact
+    validate_wheel: Callable[[Path, str], WheelInfo] = validate_wheel
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    dependencies: DistributionDependencies | None = None,
+) -> int:
+    dependencies = dependencies or DistributionDependencies()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist-dir", type=Path, default=Path("dist"))
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
@@ -695,15 +811,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         expected_version = args.expected_version or project_version(args.project)
-        artifacts = validate_distribution_directory(args.dist_dir, expected_version)
-        uv_executable = shutil.which(str(args.uv.expanduser()))
+        artifacts = dependencies.validate_distribution_directory(
+            args.dist_dir, expected_version
+        )
+        uv_executable = dependencies.find_uv(str(args.uv.expanduser()))
         if uv_executable is None:
             raise DistributionError(f"Unable to find uv executable: {args.uv}")
         uv = Path(uv_executable).resolve()
         interpreter = args.python.expanduser().resolve()
-        with tempfile.TemporaryDirectory(prefix="md2docx-distribution-") as directory:
+        with dependencies.temporary_directory(
+            prefix="md2docx-distribution-"
+        ) as directory:
             workspace = Path(directory)
-            install_and_smoke(
+            dependencies.install_and_smoke(
                 artifacts.wheel.path.resolve(),
                 workspace / "published",
                 uv,
@@ -712,20 +832,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 conversion=True,
             )
             print("Published wheel inventory and installed console smoke passed")
-            extracted = extract_sdist(
+            extracted = dependencies.extract_sdist(
                 artifacts.sdist.path.resolve(), workspace / "sdist-source"
             )
             rebuilt_directory = workspace / "rebuilt"
             rebuilt_directory.mkdir()
-            _run(
+            dependencies.run(
                 sdist_rebuild_command(uv, extracted, rebuilt_directory),
                 cwd=extracted,
                 timeout=300,
                 env=_clean_environment(),
             )
-            rebuilt_path = _select_artifact(rebuilt_directory, ".whl", "rebuilt wheel")
-            rebuilt = validate_wheel(rebuilt_path, expected_version)
-            install_and_smoke(
+            rebuilt_path = dependencies.select_artifact(
+                rebuilt_directory, ".whl", "rebuilt wheel"
+            )
+            rebuilt = dependencies.validate_wheel(rebuilt_path, expected_version)
+            dependencies.install_and_smoke(
                 rebuilt.path.resolve(),
                 workspace / "rebuilt-install",
                 uv,
