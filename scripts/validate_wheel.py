@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess  # nosec B404
 import sys
@@ -35,6 +36,7 @@ LICENSE_EXPRESSION = "MIT"
 BUILD_REQUIRES = ["hatchling==1.33.0"]
 BUILD_BACKEND = "hatchling.build"
 READ_CHUNK_SIZE = 1024 * 1024
+PROCESS_TERMINATION_TIMEOUT = 5
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_WHEEL_MEMBERS = 10_000
 MAX_WHEEL_MEMBER_BYTES = 32 * 1024 * 1024
@@ -818,9 +820,23 @@ def validate_distribution_directory(
     )
 
 
-def sdist_rebuild_command(uv: Path, source: Path, output: Path) -> list[str]:
+def sdist_rebuild_command(uv: Path, output: Path) -> list[str]:
     """Build only a wheel from an extracted sdist, leaving published files intact."""
     return [str(uv), "build", "--wheel", "--out-dir", str(output)]
+
+
+def pip_install_command(
+    python: Path,
+    wheel: Path,
+    constraints: Path | None = None,
+    *,
+    uv: Path | str = "uv",
+) -> list[str]:
+    command = [str(uv), "pip", "install", "--python", str(python)]
+    if constraints is not None:
+        command.extend(["--constraint", str(constraints)])
+    command.append(str(wheel))
+    return command
 
 
 def venv_python_path(venv: Path, *, windows: bool) -> Path:
@@ -895,6 +911,52 @@ def _clean_environment() -> dict[str, str]:
     return environment
 
 
+def _terminate_process_tree(process: subprocess.Popen[str], *, windows: bool) -> None:
+    if windows:
+        try:
+            # Fixed Windows system command with controlled arguments and no shell.
+            result = subprocess.run(  # nosec B607
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,  # nosec B603
+                check=False,
+                timeout=PROCESS_TERMINATION_TIMEOUT,
+            )
+            if result.returncode != 0:
+                process.kill()
+        except OSError, subprocess.SubprocessError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+    try:
+        process.wait(timeout=PROCESS_TERMINATION_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=PROCESS_TERMINATION_TIMEOUT)
+        except subprocess.TimeoutExpired as second_error:
+            raise DistributionError(
+                "Subprocess tree did not exit within the bounded cleanup timeout"
+            ) from second_error
+
+
 def _run(
     command: Sequence[str],
     *,
@@ -902,27 +964,45 @@ def _run(
     timeout: int,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    windows = os.name == "nt"
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if windows else 0
     try:
-        result = subprocess.run(  # nosec B603
+        process = subprocess.Popen(  # nosec B603
             list(command),
             cwd=cwd,
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
             shell=False,
-            check=False,
-            timeout=timeout,
+            start_new_session=not windows,
+            creationflags=creationflags,
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise DistributionError(f"Unable to run {command[0]}: {error}") from error
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout).strip()
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        _terminate_process_tree(process, windows=windows)
         raise DistributionError(
-            f"Command failed with exit code {result.returncode}: {command!r}\n{details}"
+            f"Command timed out after {timeout} seconds: {command!r}"
+        ) from error
+    except KeyboardInterrupt:
+        _terminate_process_tree(process, windows=windows)
+        raise
+    except (OSError, subprocess.SubprocessError) as error:
+        _terminate_process_tree(process, windows=windows)
+        raise DistributionError(f"Unable to run {command[0]}: {error}") from error
+    if process.returncode != 0:
+        details = (stderr or stdout).strip()
+        raise DistributionError(
+            f"Command failed with exit code {process.returncode}: {command!r}\n{details}"
         )
-    return result
+    return subprocess.CompletedProcess(
+        list(command), process.returncode, stdout, stderr
+    )
 
 
 def _validate_docx(path: Path) -> None:
@@ -948,6 +1028,7 @@ def install_and_smoke(
     expected_version: str,
     *,
     conversion: bool,
+    constraints: Path | None = None,
 ) -> None:
     """Install a wheel into a fresh venv and exercise its real console script."""
     label = wheel.stem
@@ -963,7 +1044,7 @@ def install_and_smoke(
     )
     python = venv_python_path(venv, windows=os.name == "nt")
     _run(
-        [str(uv), "pip", "install", "--python", str(python), str(wheel)],
+        pip_install_command(python, wheel, constraints, uv=uv),
         cwd=workspace,
         timeout=300,
         env=environment,
@@ -1050,12 +1131,21 @@ def main(
     parser.add_argument("--uv", type=Path, default=Path("uv"))
     parser.add_argument("--expected-version")
     parser.add_argument("--project", type=Path, default=Path("pyproject.toml"))
+    parser.add_argument("--constraints", type=Path)
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--skip-sdist-rebuild", action="store_true")
     args = parser.parse_args(argv)
 
     try:
         expected_version = args.expected_version or project_version(args.project)
         artifacts = dependencies.validate_distribution_directory(
             args.dist_dir, expected_version
+        )
+        if args.validate_only:
+            print("Distribution artifact validation passed")
+            return 0
+        constraints = (
+            args.constraints.expanduser().resolve() if args.constraints else None
         )
         uv_executable = dependencies.find_uv(str(args.uv.expanduser()))
         if uv_executable is None:
@@ -1073,15 +1163,19 @@ def main(
                 interpreter,
                 expected_version,
                 conversion=True,
+                constraints=constraints,
             )
             print("Published wheel inventory and installed console smoke passed")
+            if args.skip_sdist_rebuild:
+                print("Sdist content validated; rebuild skipped")
+                return 0
             extracted = dependencies.extract_sdist(
                 artifacts.sdist.path.resolve(), workspace / "sdist-source"
             )
             rebuilt_directory = workspace / "rebuilt"
             rebuilt_directory.mkdir()
             dependencies.run(
-                sdist_rebuild_command(uv, extracted, rebuilt_directory),
+                sdist_rebuild_command(uv, rebuilt_directory),
                 cwd=extracted,
                 timeout=300,
                 env=_clean_environment(),
@@ -1097,6 +1191,7 @@ def main(
                 interpreter,
                 expected_version,
                 conversion=False,
+                constraints=constraints,
             )
             print("Sdist rebuild, inventory, and installed wheel smoke passed")
     except (DistributionError, OSError) as error:

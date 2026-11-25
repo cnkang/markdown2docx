@@ -207,7 +207,12 @@ jobs:
         name: Build and validate wheel and sdist distributions
         run: |
           uv build --out-dir artifacts/dist
-          uv run --locked python scripts/validate_wheel.py --dist-dir artifacts/dist
+          uv export --locked --no-dev --no-emit-project --no-hashes --output-file artifacts/wheel-constraints.txt
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            uv run --locked python scripts/validate_wheel.py --dist-dir artifacts/dist --constraints artifacts/wheel-constraints.txt
+          else
+            uv run --locked python scripts/validate_wheel.py --dist-dir artifacts/dist --constraints artifacts/wheel-constraints.txt --skip-sdist-rebuild
+          fi
       - id: check-test-evidence
         name: Verify required test evidence
         run: uv run --locked python scripts/check_test_evidence.py
