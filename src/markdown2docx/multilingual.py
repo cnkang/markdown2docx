@@ -30,6 +30,10 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 M = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 NS = {"w": W[1:-1], "m": M[1:-1]}
+LTR_ISOLATE = "\u2066"
+RTL_ISOLATE = "\u2067"
+POP_DIRECTIONAL_ISOLATE = "\u2069"
+
 TOC_TITLES = {
     "en": "Contents",
     "zh-Hans": "目录",
@@ -571,7 +575,6 @@ class MultilingualDocument:
         pdir: str,
         *,
         code: bool = False,
-        local_dir: str | None = None,
         structure: TextStructure | None = None,
     ) -> list[dict[str, Any]]:
         result = []
@@ -587,12 +590,12 @@ class MultilingualDocument:
                     "Unmarked shared Han characters use Simplified Chinese glyphs; add lang spans for regional forms",
                 )
             marker = f"{self._marker_prefix}{len(self.runs):06d}"
-            run_rtl = local_dir == "rtl" if local_dir is not None else rtl
+            # Unicode isolates carry explicit direction; w:rtl mirrors strong script.
             self.runs[marker] = RunContext(
                 part,
                 key,
                 lang,
-                run_rtl,
+                rtl,
                 pdir,
                 name,
                 code,
@@ -657,6 +660,14 @@ class MultilingualDocument:
                     inherited_dir = attrs["dir"]
                 else:
                     local_dir = attrs["dir"]
+                    content[1] = [
+                        {
+                            "t": "Str",
+                            "c": RTL_ISOLATE if local_dir == "rtl" else LTR_ISOLATE,
+                        },
+                        *content[1],
+                        {"t": "Str", "c": POP_DIRECTIONAL_ISOLATE},
+                    ]
             previous_style = self._character_style
             if kind == "Span" and "custom-style" in attrs:
                 self._character_style = attrs["custom-style"]
@@ -766,19 +777,18 @@ class MultilingualDocument:
                 lang,
                 context or content,
                 pdir,
-                local_dir=local_dir,
                 structure=structure,
             )
         if kind == "Code":
+            text = f"{LTR_ISOLATE}{content[1]}{POP_DIRECTIONAL_ISOLATE}"
             if structure is not None:
-                structure.add_text(content[1])
+                structure.add_text(text)
             return self._mark(
-                content[1],
+                text,
                 lang,
                 context or content[1],
                 pdir,
                 code=True,
-                local_dir="ltr",
                 structure=structure,
             )
         if kind in {"Space", "SoftBreak"}:
@@ -814,7 +824,7 @@ class MultilingualDocument:
                 inherited_dir,
                 "",
                 pdir,
-                local_dir,
+                None,
                 None,
                 "footnotes",
             )
