@@ -13,6 +13,14 @@ from xml.etree import ElementTree  # nosec B405
 
 POSIX_ONLY_PREFIX = "posix_only:"
 OUTPUT_TEST_FILE = "tests/test_output.py"
+REQUIRED_WINDOWS_OUTPUT_CASES = (
+    "test_windows_rejects_junction_output_parent",
+    "test_windows_staged_output_pins_parent_directory",
+    "test_windows_no_overwrite_preserves_existing_file",
+    "test_windows_writer_failure_preserves_existing_file",
+    "test_windows_validation_failure_preserves_existing_file",
+    "test_windows_rejects_real_casefolded_input_output_alias",
+)
 
 
 def _test_file(case: ElementTree.Element) -> str:
@@ -41,20 +49,32 @@ def _skip_reason(skipped: ElementTree.Element) -> str:
 
 
 def find_unexpected_skips(junit_xml: Path, *, windows: bool) -> list[str]:
-    """Return policy violations; only POSIX-only output tests may skip on Windows."""
+    """Enforce Windows skips and require every dedicated output safety case."""
     # pytest generates this local report; it is not external or user-supplied XML.
     root = ElementTree.parse(junit_xml).getroot()  # nosec B314
     if not windows:
         return []
 
+    required = set(REQUIRED_WINDOWS_OUTPUT_CASES)
+    seen_required = set()
     violations = []
     for case in root.iter("testcase"):
         test_file = _test_file(case)
         test_name = case.get("name", "<unnamed>")
-        for skipped in case.findall("skipped"):
+        base_name = test_name.partition("[")[0]
+        is_output_test = test_file == OUTPUT_TEST_FILE
+        is_required = is_output_test and base_name in required
+        skipped_cases = case.findall("skipped")
+        if is_required:
+            seen_required.add(base_name)
+        for skipped in skipped_cases:
             reason = _skip_reason(skipped)
             identity = f"{test_file}::{test_name}"
-            if test_file == OUTPUT_TEST_FILE:
+            if is_required:
+                violations.append(
+                    f"{identity}: required Windows output case was skipped: {reason}"
+                )
+            elif is_output_test:
                 if not reason.startswith(POSIX_ONLY_PREFIX):
                     violations.append(
                         f"{identity}: skip reason must start with {POSIX_ONLY_PREFIX!r}; "
@@ -64,6 +84,12 @@ def find_unexpected_skips(junit_xml: Path, *, windows: bool) -> list[str]:
                 violations.append(
                     f"{identity}: unexpected skip outside {OUTPUT_TEST_FILE}: {reason}"
                 )
+
+    for name in REQUIRED_WINDOWS_OUTPUT_CASES:
+        if name not in seen_required:
+            violations.append(
+                f"{OUTPUT_TEST_FILE}::{name}: missing required Windows output case"
+            )
     return violations
 
 
@@ -81,7 +107,7 @@ def main(argv: Sequence[str] | None = None, *, windows: bool | None = None) -> i
         return 2
 
     if violations:
-        print("Unexpected pytest skips:", file=sys.stderr)
+        print("Windows test coverage audit failed:", file=sys.stderr)
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
         return 1
