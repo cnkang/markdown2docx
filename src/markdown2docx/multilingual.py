@@ -14,7 +14,7 @@ import tempfile
 import unicodedata
 import uuid
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from .fonts import FontResolver
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 M = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 NS = {"w": W[1:-1], "m": M[1:-1]}
 TOC_TITLES = {
     "en": "Contents",
@@ -595,6 +596,7 @@ class MultilingualDocument:
                             self._split_run(
                                 run,
                                 value,
+                                path=path,
                                 code=code,
                                 lang=code_lang,
                                 context=paragraph_text,
@@ -727,6 +729,14 @@ class MultilingualDocument:
                 runs = list(root.iter(W + "r"))
                 paragraphs = list(root.iter(W + "p"))
                 for index, spec in expected_runs:
+                    if index >= len(runs):
+                        failures.append(f"{name}: run text mismatch at index {index}")
+                        continue
+                    actual_text = "".join(
+                        runs[index].xpath("./w:t/text()", namespaces=NS)
+                    )
+                    if actual_text != spec.text:
+                        failures.append(f"{name}: run text mismatch at index {index}")
                     props = runs[index].find(W + "rPr")
                     family = self.resolver.resolve(spec.font).family
                     fonts = props.find(W + "rFonts") if props is not None else None
@@ -761,20 +771,53 @@ class MultilingualDocument:
             raise ValidationError(str(path), failures[:10])
 
     def _split_run(
-        self, run: Any, text: str, *, code: bool, lang: str | None, context: str
+        self,
+        run: Any,
+        text: str,
+        *,
+        path: Path,
+        code: bool,
+        lang: str | None,
+        context: str,
     ) -> None:
-        # Preserve non-text run children (breaks, references) by replacing only
-        # simple text-only runs. Other runs keep their structure and receive fonts.
         parts = self._fragments(text, lang, context, code=code)
         if not parts:
             return
-        for key, part, _, _ in parts:
-            self.resolver.resolve(key, self._checked_text(part))
         parent = run.getparent()
         text_children = run.findall(W + "t")
-        if len(text_children) != 1 or any(
-            child.tag not in {W + "rPr", W + "t"} for child in run
+        unsafe = None
+        if parent is None:
+            unsafe = "run has no parent"
+        elif not text_children:
+            unsafe = "run has no text nodes"
+        elif len(run.findall(W + "rPr")) > 1:
+            unsafe = "run has multiple property nodes"
+        elif any(len(child) for child in text_children):
+            unsafe = "text node contains nested markup"
+        elif any(
+            child.tag not in {W + "rPr", W + "t"}
+            and any(
+                next(child.iter(tag), None) is not None for tag in (W + "r", W + "t")
+            )
+            for child in run
         ):
+            unsafe = "run contains nested text runs"
+        elif any(
+            (run.text and run.text.strip()) or (child.tail and child.tail.strip())
+            for child in run
+        ):
+            unsafe = "run contains unmanaged text"
+        elif "".join(child.text or "" for child in text_children) != text:
+            unsafe = "run text does not match its text nodes"
+        elif "".join(part for _, part, _, _ in parts) != text or any(
+            not part for _, part, _, _ in parts
+        ):
+            unsafe = "text fragments do not match the run"
+        if unsafe:
+            raise ValidationError(str(path), [f"Cannot safely split run: {unsafe}"])
+        for key, part, _, _ in parts:
+            self.resolver.resolve(key, self._checked_text(part))
+        if len(parts) == 1:
             key, _, rtl, name = parts[0]
             self._properties(
                 run,
@@ -783,21 +826,72 @@ class MultilingualDocument:
                 ),
             )
             return
-        index = parent.index(run)
-        for offset, (key, part, rtl, name) in enumerate(parts):
-            clone = copy.deepcopy(run)
-            clone.find(W + "t").text = part
-            self._properties(
-                clone,
-                RunContext(
-                    part, key, lang, rtl, "ltr" if code else direction(text), name, code
-                ),
+
+        def make_run(*children: Any) -> Any:
+            clone = etree.Element(W + "r")
+            props = run.find(W + "rPr")
+            if props is not None:
+                clone.append(copy.deepcopy(props))
+            for child in children:
+                clone.append(child)
+            return clone
+
+        replacements: list[Any] = []
+        part_index = 0
+        part_offset = 0
+        for child in list(run):
+            if child.tag == W + "rPr":
+                continue
+            if child.tag != W + "t":
+                replacements.append(make_run(child))
+                continue
+            source = child.text or ""
+            if not source:
+                replacements.append(make_run(copy.deepcopy(child)))
+                continue
+            offset = 0
+            while offset < len(source):
+                key, part, rtl, name = parts[part_index]
+                take = min(len(part) - part_offset, len(source) - offset)
+                piece = source[offset : offset + take]
+                text_node = copy.deepcopy(child)
+                text_node.text = piece
+                clone = make_run(text_node)
+                self._properties(
+                    clone,
+                    RunContext(
+                        piece,
+                        key,
+                        lang,
+                        rtl,
+                        "ltr" if code else direction(text),
+                        name,
+                        code,
+                    ),
+                )
+                replacements.append(clone)
+                offset += take
+                part_offset += take
+                if part_offset == len(part):
+                    part_index += 1
+                    part_offset = 0
+        if part_index != len(parts) or part_offset:
+            raise ValidationError(
+                str(path), ["Cannot safely split run: text fragments were not consumed"]
             )
-            parent.insert(index + offset, clone)
+        index = parent.index(run)
+        for offset, replacement in enumerate(replacements):
+            parent.insert(index + offset, replacement)
         parent.remove(run)
 
     def _properties(self, run: Any, spec: RunContext) -> None:
-        self._styled_runs[run] = spec
+        # Marker contexts can span multiple physical runs; track each run's text.
+        actual_text = "".join(run.xpath("./w:t/text()", namespaces=NS))
+        self._styled_runs[run] = replace(spec, text=actual_text)
+        for text_node in run.findall(W + "t"):
+            value = text_node.text or ""
+            if value[:1].isspace() or value[-1:].isspace():
+                text_node.set(XML_SPACE, "preserve")
         props = run.find(W + "rPr")
         if props is None:
             props = etree.Element(W + "rPr")
