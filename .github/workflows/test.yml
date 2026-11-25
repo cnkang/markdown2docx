@@ -17,11 +17,33 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         with:
           version: "0.12.23"
           enable-cache: true
       - run: uv sync --locked --group dev --group test
+      - name: Smoke test agent skill launcher
+        run: |
+          uv run --locked python - <<'PY'
+          import importlib.util
+          import re
+          import subprocess
+          from pathlib import Path
+
+          launcher_path = Path("skills/markdown-to-docx/scripts/run.py")
+          spec = importlib.util.spec_from_file_location("skill_launcher", launcher_path)
+          assert spec is not None and spec.loader is not None
+          launcher = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(launcher)
+          assert re.fullmatch(r"[0-9a-f]{40}", launcher.EXECUTION_REVISION)
+          subprocess.run(
+              ["git", "cat-file", "-e", f"{launcher.EXECUTION_REVISION}^{{commit}}"],
+              check=True,
+          )
+          PY
+          uv run --locked pytest tests/test_skill.py
       - run: make quality
       - run: uv run --locked pre-commit run --all-files
   test:

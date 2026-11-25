@@ -7,7 +7,7 @@ import shutil
 import subprocess  # nosec B404
 import sys
 
-EXECUTION_REVISION = "8b115d196347ca25be622fa4c2e513ae20501284"
+EXECUTION_REVISION = "ef78ef359713887e8a30dc9f08b197731a52313f"
 SOURCE = f"git+https://github.com/cnkang/markdown2docx.git@{EXECUTION_REVISION}"
 
 
@@ -19,11 +19,13 @@ def main() -> int:
         )
         return 127
     # tool executable and argv, no shell
+    uv_arguments = ["--offline"] if "--offline" in sys.argv[1:] else []
     return subprocess.call(  # nosec B603
         [
             uv,
             "tool",
             "run",
+            *uv_arguments,
             "--python",
             "3.14",
             "--from",
