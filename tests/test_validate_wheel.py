@@ -488,8 +488,14 @@ def test_sdist_extraction_rejects_unicode_nfc_collisions(validator, tmp_path):
         "NUL",
         "COM1",
         "COM9.log",
+        "COM\u00b9",
+        "COM\u00b2.txt",
+        "COM\u00b3",
         "LPT1",
         "LPT9.txt",
+        "LPT\u00b9",
+        "LPT\u00b2.txt",
+        "LPT\u00b3",
     ],
 )
 def test_sdist_extraction_rejects_windows_unsafe_names(validator, tmp_path, name):
@@ -553,6 +559,63 @@ def test_sdist_extraction_rejects_file_directory_collisions(validator, tmp_path)
         validator.extract_sdist(sdist, tmp_path / "extracted")
 
 
+@pytest.mark.parametrize(
+    ("alias", "long_name"),
+    [
+        ("PYPROJ~1.TOM", "pyproject.toml"),
+        ("README~1.MD", "README-long.md"),
+        ("CONFIG~2.CON", "configuration-long.conf"),
+        ("PROJEC~1/pyproject.toml", "project-long/pyproject.toml"),
+    ],
+)
+def test_sdist_extraction_rejects_windows_83_alias_collisions(
+    validator, tmp_path, alias, long_name
+):
+    files = sdist_files()
+    files[f"{SDIST_ROOT}/{alias}"] = b"alias\n"
+    files[f"{SDIST_ROOT}/{long_name}"] = b"long name\n"
+    if alias == "PYPROJ~1.TOM":
+        files[f"{SDIST_ROOT}/pyproject.toml"] = PYPROJECT
+    sdist = write_sdist(tmp_path, files=files)
+
+    with pytest.raises(ValueError, match="8\\.3|alias.*collision"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_extraction_allows_short_names_without_alias_evidence(
+    validator, tmp_path
+):
+    files = sdist_files(
+        **{
+            f"{SDIST_ROOT}/short.txt": b"short\n",
+            f"{SDIST_ROOT}/file~1.txt": b"literal tilde\n",
+            f"{SDIST_ROOT}/README~1.MD": b"no long sibling\n",
+        }
+    )
+    sdist = write_sdist(tmp_path, files=files)
+
+    root = validator.extract_sdist(sdist, tmp_path / "extracted")
+
+    assert (root / "file~1.txt").read_bytes() == b"literal tilde\n"
+    assert (root / "README~1.MD").read_bytes() == b"no long sibling\n"
+
+
+def test_sdist_extraction_allows_alias_candidates_in_different_directories(
+    validator, tmp_path
+):
+    files = sdist_files(
+        **{
+            f"{SDIST_ROOT}/first/PYPROJ~1.TOM": b"alias\n",
+            f"{SDIST_ROOT}/second/pyproject.toml": b"different directory\n",
+        }
+    )
+    sdist = write_sdist(tmp_path, files=files)
+
+    root = validator.extract_sdist(sdist, tmp_path / "extracted")
+
+    assert (root / "first/PYPROJ~1.TOM").read_bytes() == b"alias\n"
+
+
 def test_sdist_extraction_enforces_entry_count_limit(validator, tmp_path, monkeypatch):
     contents = sdist_files()
     monkeypatch.setattr(validator, "MAX_SDIST_MEMBERS", len(contents) - 1)
@@ -603,6 +666,27 @@ def test_sdist_extraction_uses_tarfile_data_filter(validator, tmp_path, monkeypa
     validator.extract_sdist(sdist, tmp_path / "extracted")
 
     assert filtered == list(sdist_files())
+
+
+@pytest.mark.parametrize("same_size", [False, True])
+def test_sdist_extraction_detects_post_extraction_tampering(
+    validator, tmp_path, monkeypatch, same_size
+):
+    original_extractall = tarfile.TarFile.extractall
+    original = b"# Synthetic distribution\n"
+    tampered = b"X" * len(original) if same_size else b"tampered\n"
+
+    def tamper_after_extract(self, *args, **kwargs):
+        result = original_extractall(self, *args, **kwargs)
+        path = args[0] if args else kwargs["path"]
+        (Path(path) / SDIST_ROOT / "README.md").write_bytes(tampered)
+        return result
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", tamper_after_extract)
+    sdist = write_sdist(tmp_path)
+
+    with pytest.raises(ValueError, match="SHA-256|size|content|mismatch"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
 
 
 def test_sdist_extraction_rejects_preexisting_root_symlink(validator, tmp_path):
