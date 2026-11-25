@@ -45,9 +45,9 @@
 
 **Files:** `src/markdown2docx/multilingual.py`, `tests/test_multilingual.py`
 
-- [ ] Add failing tests for Latin/Common `dir=rtl`, numeric/punctuation spans, nested direction, and `dir=ltr` inside Arabic.
-- [ ] Separate explicit direction from script inference and serialize/verify run direction.
-- [ ] Run focused/full tests; commit `fix: honor explicit local bidi direction`.
+- [x] Add failing tests for Latin/Common `dir=rtl`, numeric/punctuation spans, nested direction, `dir=ltr` inside Arabic, code, tables, footnotes, and conflicting controls.
+- [x] Separate explicit direction from script inference using LRI/RLI/PDI isolates; keep `w:rtl` script-accurate and verify serialized direction.
+- [x] Run focused/full tests (`396 passed, 1 skipped`); final fix `02d3234`.
 
 ### Task 5: Repair Agent skill execution pin
 
