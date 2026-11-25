@@ -33,6 +33,8 @@ NS = {"w": W[1:-1], "m": M[1:-1]}
 LTR_ISOLATE = "\u2066"
 RTL_ISOLATE = "\u2067"
 POP_DIRECTIONAL_ISOLATE = "\u2069"
+BIDI_CONTROL_PATTERN = regex.compile(r"\p{Bidi_Control}")
+DIRECTIONAL_CONTROL_PATTERN = regex.compile(r"[\u202a-\u202e\u2066-\u2069]")
 
 TOC_TITLES = {
     "en": "Contents",
@@ -122,7 +124,13 @@ def fragments(
 ) -> list[tuple[str, str, bool, str]]:
     """Split at grapheme boundaries; attach neutral punctuation to adjacent text."""
     clusters = regex.findall(r"\X", text)
-    scripts = [script(c) for c in clusters]
+    controls = [
+        BIDI_CONTROL_PATTERN.fullmatch(cluster) is not None for cluster in clusters
+    ]
+    scripts = [
+        "Common" if control else script(cluster)
+        for cluster, control in zip(clusters, controls, strict=True)
+    ]
     following: list[str | None] = [None] * len(scripts)
     next_script = None
     for index in range(len(scripts) - 1, -1, -1):
@@ -131,6 +139,9 @@ def fragments(
             next_script = scripts[index]
     previous_script = None
     for index, name in enumerate(scripts):
+        if controls[index]:
+            previous_script = None
+            continue
         if name == "Common":
             scripts[index] = (
                 previous_script
@@ -143,7 +154,14 @@ def fragments(
     current: tuple[str, bool, str] | None = None
     if cjk is None:
         cjk, _ = cjk_key(lang, context)
-    for cluster, name in zip(clusters, scripts, strict=True):
+    for cluster, name, control in zip(clusters, scripts, controls, strict=True):
+        if control:
+            if current is not None:
+                result.append((current[0], "".join(buffered), current[1], current[2]))
+                buffered = []
+                current = None
+            result.append(("mono" if code else "sans", cluster, False, "Common"))
+            continue
         if name == "Arabic" and not all(ord(c) < 128 for c in cluster):
             key = "arabic"
         elif name in {"Han", "Hiragana", "Katakana", "Hangul"}:
@@ -200,6 +218,21 @@ def text_of(node: Any) -> str:
     if kind == "Header":
         return text_of(content[2])
     return text_of(content)
+
+
+def _contains_direction_control(node: Any) -> bool:
+    if isinstance(node, list):
+        return any(_contains_direction_control(item) for item in node)
+    if not isinstance(node, dict):
+        return False
+    kind = node.get("t")
+    if kind == "Note":
+        return False
+    if kind == "Str":
+        return DIRECTIONAL_CONTROL_PATTERN.search(str(node.get("c", ""))) is not None
+    if kind == "Code":
+        return DIRECTIONAL_CONTROL_PATTERN.search(str(node["c"][1])) is not None
+    return _contains_direction_control(node.get("c"))
 
 
 def _append_text(events: list[str | None], text: str) -> None:
@@ -580,7 +613,7 @@ class MultilingualDocument:
         result = []
         cjk, ambiguous = self._context_key(lang, context)
         for key, part, rtl, name in fragments(text, lang, context, code=code, cjk=cjk):
-            if key == "sans" and self._role == "heading":
+            if key == "sans" and name != "Common" and self._role == "heading":
                 key = "heading"
             self.resolver.resolve(key, self._checked_text(part))
             self.scripts.add(name)
@@ -659,6 +692,11 @@ class MultilingualDocument:
                 if kind == "Div":
                     inherited_dir = attrs["dir"]
                 else:
+                    if _contains_direction_control(content[1]):
+                        raise ConfigurationError(
+                            "dir",
+                            "Explicit direction spans cannot contain bidi controls",
+                        )
                     local_dir = attrs["dir"]
                     content[1] = [
                         {
@@ -667,6 +705,11 @@ class MultilingualDocument:
                         },
                         *content[1],
                         {"t": "Str", "c": POP_DIRECTIONAL_ISOLATE},
+                    ]
+                    content[0][2] = [
+                        attribute
+                        for attribute in content[0][2]
+                        if attribute[0] != "dir"
                     ]
             previous_style = self._character_style
             if kind == "Span" and "custom-style" in attrs:
