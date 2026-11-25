@@ -764,26 +764,30 @@ class MultilingualDocument:
                 all_runs = list(root.iter(W + "r"))
                 actual_runs = [run for run in all_runs if run.find(W + "t") is not None]
                 for run_index, run in enumerate(all_runs):
-                    if next(run.iter(W + "t"), None) is None:
-                        continue
-                    actual_text = "".join(run.xpath("./w:t/text()", namespaces=NS))
-                    unsafe = self._validate_run_shape(run, actual_text)
-                    if unsafe:
+                    if self._run_properties_contain_text(run):
                         failures.append(
                             f"{name}: invalid text run shape at run index "
-                            f"{run_index}: {unsafe}"
+                            f"{run_index}: run properties contain nested text"
                         )
                 paragraphs = list(root.iter(W + "p"))
                 if len(actual_runs) != len(expected_runs):
                     failures.append(f"{name}: text run stream count mismatch")
                 for index, run in enumerate(actual_runs):
+                    actual_text = "".join(run.xpath("./w:t/text()", namespaces=NS))
+                    unsafe = self._validate_run_shape(run, actual_text)
+                    if unsafe:
+                        if not self._run_properties_contain_text(run):
+                            failures.append(
+                                f"{name}: invalid text run shape at stream index "
+                                f"{index}: {unsafe}"
+                            )
+                        continue
                     if index >= len(expected_runs):
                         failures.append(
                             f"{name}: unexpected text run in stream at index {index}"
                         )
                         continue
                     spec = expected_runs[index]
-                    actual_text = "".join(run.xpath("./w:t/text()", namespaces=NS))
                     if actual_text != spec.text:
                         failures.append(
                             f"{name}: run text mismatch at stream index {index}"
@@ -833,6 +837,13 @@ class MultilingualDocument:
         if failures:
             raise ValidationError(str(path), failures[:10])
 
+    def _run_properties_contain_text(self, run: Any) -> bool:
+        return any(
+            next(props.iter(tag), None) is not None
+            for props in run.findall(W + "rPr")
+            for tag in (W + "r", W + "t")
+        )
+
     def _validate_run_shape(self, run: Any, text: str) -> str | None:
         text_children = run.findall(W + "t")
         if run.getparent() is None:
@@ -841,11 +852,7 @@ class MultilingualDocument:
             return "run has no text nodes"
         if len(run.findall(W + "rPr")) > 1:
             return "run has multiple property nodes"
-        if any(
-            next(props.iter(tag), None) is not None
-            for props in run.findall(W + "rPr")
-            for tag in (W + "r", W + "t")
-        ):
+        if self._run_properties_contain_text(run):
             return "run properties contain nested text"
         if any(len(child) for child in text_children):
             return "text node contains nested markup"
