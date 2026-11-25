@@ -2,6 +2,7 @@
 """Validate distribution contents, installed entry points, and sdist rebuilds."""
 
 import argparse
+import base64
 import configparser
 import csv
 import hashlib
@@ -33,7 +34,13 @@ REQUIRES_PYTHON = ">=3.14"
 LICENSE_EXPRESSION = "MIT"
 BUILD_REQUIRES = ["hatchling==1.33.0"]
 BUILD_BACKEND = "hatchling.build"
+READ_CHUNK_SIZE = 1024 * 1024
+MAX_WHEEL_BYTES = 64 * 1024 * 1024
+MAX_WHEEL_MEMBERS = 10_000
+MAX_WHEEL_MEMBER_BYTES = 32 * 1024 * 1024
+MAX_WHEEL_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_SDIST_MEMBERS = 10_000
+MAX_SDIST_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_SDIST_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 WINDOWS_DEVICE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -42,7 +49,7 @@ WINDOWS_DEVICE_NAMES = frozenset(
     | {"COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3"}
 )
 WINDOWS_83_ALIAS = re.compile(
-    r"^(?P<base>[A-Za-z0-9_$!#%&'()@^`{}-]{1,6})~[1-9]"
+    r"^(?P<base>[A-Za-z0-9_$!#%&'()@^`{}-]{1,6})~[1-9][0-9]*"
     r"(?:\.(?P<extension>[A-Za-z0-9]{1,3}))?$"
 )
 WINDOWS_83_CHARACTERS = frozenset("_-$~!#%&'()@^`{}")
@@ -137,19 +144,19 @@ def _safe_member_name(name: str) -> PurePosixPath:
     return PurePosixPath(normalized)
 
 
-def _sdist_member_path(name: str) -> PurePosixPath:
+def _archive_member_path(name: str) -> PurePosixPath:
     path = _safe_member_name(name)
     for part in path.parts:
         if part.endswith((" ", ".")):
             raise DistributionError(
-                f"Unsafe Windows trailing space or dot in sdist member: {name!r}"
+                f"Unsafe Windows trailing space or dot in archive member: {name!r}"
             )
         if ":" in part:
-            raise DistributionError(f"Unsafe Windows colon in sdist member: {name!r}")
+            raise DistributionError(f"Unsafe Windows colon in archive member: {name!r}")
         device_name = part.split(".", 1)[0].upper()
         if device_name in WINDOWS_DEVICE_NAMES:
             raise DistributionError(
-                f"Unsafe Windows reserved device name in sdist member: {name!r}"
+                f"Unsafe Windows reserved device name in archive member: {name!r}"
             )
     return path
 
@@ -167,11 +174,17 @@ def _is_windows_83_short_character(character: str) -> bool:
     )
 
 
-def _windows_83_alias_conflicts(alias: str, candidate: str) -> bool:
-    match = WINDOWS_83_ALIAS.fullmatch(alias)
-    if match is None or "~" in candidate:
-        return False
-    base, extension = _windows_83_name_parts(candidate)
+def _windows_83_alias_key(name: str) -> tuple[str, str] | None:
+    match = WINDOWS_83_ALIAS.fullmatch(name)
+    if match is None:
+        return None
+    return match.group("base").casefold(), (match.group("extension") or "").casefold()
+
+
+def _windows_83_long_name_key(name: str) -> tuple[str, str] | None:
+    if "~" in name:
+        return None
+    base, extension = _windows_83_name_parts(name)
     if (
         len(base) <= 8
         and len(extension) <= 3
@@ -179,7 +192,7 @@ def _windows_83_alias_conflicts(alias: str, candidate: str) -> bool:
             _is_windows_83_short_character(character) for character in base + extension
         )
     ):
-        return False
+        return None
     short_base = "".join(
         character
         for character in base
@@ -190,76 +203,108 @@ def _windows_83_alias_conflicts(alias: str, candidate: str) -> bool:
         for character in extension
         if character.isascii() and character.isalnum()
     )[:3].casefold()
-    return (
-        match.group("base").casefold() == short_base
-        and (match.group("extension") or "").casefold() == short_extension
-    )
+    return short_base, short_extension
 
 
-def _reject_windows_83_alias_collisions(
-    identities: Mapping[str, tarfile.TarInfo],
-) -> None:
-    sibling_groups = {}
-    for identity in identities:
-        parts = PurePosixPath(identity).parts
-        for index, part in enumerate(parts):
-            parent = unicodedata.normalize("NFC", "/".join(parts[:index])).casefold()
-            normalized_part = unicodedata.normalize("NFC", part).casefold()
-            sibling_groups.setdefault(parent, {})[normalized_part] = part
-    for siblings in sibling_groups.values():
-        for alias in siblings.values():
-            if WINDOWS_83_ALIAS.fullmatch(alias) is None:
-                continue
-            for candidate in siblings.values():
-                if alias != candidate and _windows_83_alias_conflicts(alias, candidate):
-                    raise DistributionError(
-                        f"Potential Windows 8.3 alias collision: {alias!r} and {candidate!r}"
-                    )
+class _ArchiveInventory:
+    """Linear-time path, collision, and resource accounting for ZIP and TAR members."""
 
+    def __init__(
+        self,
+        label: str,
+        max_members: int,
+        max_member_bytes: int,
+        max_total_bytes: int,
+    ) -> None:
+        self.label = label
+        self.max_members = max_members
+        self.max_member_bytes = max_member_bytes
+        self.max_total_bytes = max_total_bytes
+        self.count = 0
+        self.total_size = 0
+        self.identities: dict[str, bool] = {}
+        self.normalized_names: dict[str, str] = {}
+        self.parents: set[str] = set()
+        self.alias_index: dict[tuple[str, str, str], set[str]] = {}
+        self.long_name_index: dict[tuple[str, str, str], set[str]] = {}
 
-def _validate_sdist_members(members: Sequence[tarfile.TarInfo]) -> None:
-    if len(members) > MAX_SDIST_MEMBERS:
-        raise DistributionError(
-            f"Sdist exceeds the entry count limit: {len(members)} > {MAX_SDIST_MEMBERS}"
-        )
-    total_size = 0
-    identities = {}
-    normalized_names = {}
-    for member in members:
-        path = _sdist_member_path(member.name)
-        identity = str(path)
-        if identity in identities:
-            raise DistributionError(f"Duplicate sdist member path: {member.name}")
-        if not (member.isfile() or member.isdir()):
-            raise DistributionError(f"Unsafe sdist member type: {member.name}")
-        if member.size < 0:
-            raise DistributionError(f"Unsafe negative sdist member size: {member.name}")
-        if member.isfile():
-            total_size += member.size
-        identities[identity] = member
-        normalized = unicodedata.normalize("NFC", identity).casefold()
-        if normalized in normalized_names:
+    def add(self, name: str, size: int, *, is_dir: bool) -> str:
+        self.count += 1
+        if self.count > self.max_members:
             raise DistributionError(
-                "Sdist member collision after casefold/NFC normalization: "
-                f"{normalized_names[normalized]!r} and {identity!r}"
+                f"{self.label} exceeds the entry count limit: "
+                f"{self.count} > {self.max_members}"
             )
-        normalized_names[normalized] = identity
-    if total_size > MAX_SDIST_UNCOMPRESSED_BYTES:
-        raise DistributionError(
-            "Sdist exceeds the total uncompressed size limit: "
-            f"{total_size} > {MAX_SDIST_UNCOMPRESSED_BYTES}"
-        )
-    for normalized in normalized_names:
+        path = _archive_member_path(name)
+        identity = str(path)
+        normalized = unicodedata.normalize("NFC", identity).casefold()
+        if identity in self.identities:
+            raise DistributionError(f"Duplicate {self.label} member path: {name}")
+        if normalized in self.normalized_names:
+            raise DistributionError(
+                f"{self.label} member collision after casefold/NFC normalization: "
+                f"{self.normalized_names[normalized]!r} and {identity!r}"
+            )
+        if size < 0:
+            raise DistributionError(f"Unsafe negative {self.label} member size: {name}")
+        if not is_dir:
+            if size > self.max_member_bytes:
+                raise DistributionError(
+                    f"{self.label} member exceeds the single-member size limit: {name}"
+                )
+            self.total_size += size
+            if self.total_size > self.max_total_bytes:
+                raise DistributionError(
+                    f"{self.label} exceeds the total uncompressed size limit"
+                )
         parts = normalized.split("/")
         for index in range(1, len(parts)):
             parent = "/".join(parts[:index])
-            original_parent = normalized_names.get(parent)
-            if original_parent is not None and not identities[original_parent].isdir():
+            original_parent = self.normalized_names.get(parent)
+            if original_parent is not None and not self.identities[original_parent]:
                 raise DistributionError(
-                    "Sdist file/directory collision: "
-                    f"{original_parent!r} and {normalized_names[normalized]!r}"
+                    f"{self.label} file/directory collision: "
+                    f"{original_parent!r} and {identity!r}"
                 )
-    _reject_windows_83_alias_collisions(identities)
+        if not is_dir and normalized in self.parents:
+            raise DistributionError(
+                f"{self.label} file/directory collision: {identity!r}"
+            )
+        self.identities[identity] = is_dir
+        self.normalized_names[normalized] = identity
+        for index in range(1, len(parts)):
+            self.parents.add("/".join(parts[:index]))
+        self._index_windows_83_components(identity, parts)
+        return identity
+
+    def _index_windows_83_components(self, identity: str, parts: list[str]) -> None:
+        for index in range(len(parts)):
+            parent = "/".join(parts[:index])
+            original_part = PurePosixPath(identity).parts[index]
+            alias_key = _windows_83_alias_key(original_part)
+            if alias_key is not None:
+                key = (parent, *alias_key)
+                candidates = self.long_name_index.get(key, set())
+                if candidates - {original_part}:
+                    candidate = sorted(candidates - {original_part})[0]
+                    raise DistributionError(
+                        f"Potential Windows 8.3 alias collision: "
+                        f"{original_part!r} and {candidate!r}"
+                    )
+                self.alias_index.setdefault(key, set()).add(original_part)
+                continue
+            long_key = _windows_83_long_name_key(original_part)
+            if long_key is None:
+                continue
+            key = (parent, *long_key)
+            aliases = self.alias_index.get(key, set())
+            if aliases - {original_part}:
+                alias = sorted(aliases - {original_part})[0]
+                raise DistributionError(
+                    f"Potential Windows 8.3 alias collision: "
+                    f"{alias!r} and {original_part!r}"
+                )
+            self.long_name_index.setdefault(key, set()).add(original_part)
 
 
 def _reject_unwanted_members(names: Sequence[str], *, wheel: bool) -> None:
@@ -278,21 +323,45 @@ def _reject_unwanted_members(names: Sequence[str], *, wheel: bool) -> None:
             raise DistributionError(f"Unwanted development file in artifact: {name}")
 
 
+def _read_stream_bounded(stream: BinaryIO, max_bytes: int, label: str) -> bytes:
+    if max_bytes < 0:
+        raise DistributionError(f"Unsafe negative size for {label}")
+    chunks = []
+    total = 0
+    while chunk := stream.read(min(READ_CHUNK_SIZE, max_bytes - total + 1)):
+        total += len(chunk)
+        if total > max_bytes:
+            raise DistributionError(f"{label} exceeds its declared size limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _read_wheel(path: Path) -> dict[str, bytes]:
     _require_artifact(path, "wheel")
     if path.suffix != ".whl":
         raise DistributionError(f"Expected a .whl artifact: {path}")
+    try:
+        if path.stat().st_size > MAX_WHEEL_BYTES:
+            raise DistributionError(
+                f"Wheel exceeds the physical archive size limit: {path}"
+            )
+    except OSError as error:
+        raise DistributionError(
+            f"Unable to stat wheel archive {path}: {error}"
+        ) from error
     files = {}
-    seen = set()
+    inventory = _ArchiveInventory(
+        "Wheel",
+        MAX_WHEEL_MEMBERS,
+        MAX_WHEEL_MEMBER_BYTES,
+        MAX_WHEEL_UNCOMPRESSED_BYTES,
+    )
     try:
         with zipfile.ZipFile(path) as archive:
             for member in archive.infolist():
-                _safe_member_name(member.filename)
-                if member.filename in seen:
-                    raise DistributionError(
-                        f"Duplicate wheel member path: {member.filename}"
-                    )
-                seen.add(member.filename)
+                identity = inventory.add(
+                    member.filename, member.file_size, is_dir=member.is_dir()
+                )
                 if member.flag_bits & 1:
                     raise DistributionError(
                         f"Encrypted wheel member is not allowed: {member.filename}"
@@ -302,7 +371,10 @@ def _read_wheel(path: Path) -> dict[str, bytes]:
                         f"Wheel member must not be a symlink: {member.filename}"
                     )
                 if not member.is_dir():
-                    files[member.filename] = archive.read(member)
+                    with archive.open(member) as source:
+                        files[identity] = _read_stream_bounded(
+                            source, member.file_size, f"Wheel member {identity}"
+                        )
     except DistributionError:
         raise
     except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
@@ -317,19 +389,30 @@ def _read_sdist(path: Path) -> dict[str, bytes]:
     if not path.name.endswith(".tar.gz"):
         raise DistributionError(f"Expected a .tar.gz sdist artifact: {path}")
     files = {}
+    inventory = _ArchiveInventory(
+        "Sdist",
+        MAX_SDIST_MEMBERS,
+        MAX_SDIST_MEMBER_BYTES,
+        MAX_SDIST_UNCOMPRESSED_BYTES,
+    )
     try:
         with tarfile.open(path, "r:gz") as archive:
-            members = archive.getmembers()
-            _validate_sdist_members(members)
-            for member in members:
+            for member in archive:
+                identity = inventory.add(
+                    member.name, member.size, is_dir=member.isdir()
+                )
+                if not (member.isfile() or member.isdir()):
+                    raise DistributionError(f"Unsafe sdist member type: {member.name}")
                 if member.isfile():
-                    identity = str(_sdist_member_path(member.name))
                     source = archive.extractfile(member)
                     if source is None:
                         raise DistributionError(
                             f"Unable to read sdist member: {member.name}"
                         )
-                    files[identity] = source.read()
+                    with source:
+                        files[identity] = _read_stream_bounded(
+                            source, member.size, f"Sdist member {identity}"
+                        )
     except DistributionError:
         raise
     except (EOFError, OSError, tarfile.TarError) as error:
@@ -409,6 +492,23 @@ def _validate_record(files: Mapping[str, bytes], record_path: str) -> None:
     recorded = [row[0] for row in rows]
     if len(recorded) != len(set(recorded)) or set(recorded) != set(files):
         raise DistributionError("Wheel RECORD does not match the wheel inventory")
+    for name, hash_value, size_value in rows:
+        if name == record_path:
+            if hash_value or size_value:
+                raise DistributionError(
+                    "Wheel RECORD self-entry must have empty hash/size"
+                )
+            continue
+        data = files[name]
+        expected_hash = "sha256=" + base64.urlsafe_b64encode(
+            hashlib.sha256(data).digest()
+        ).rstrip(b"=").decode("ascii")
+        if hash_value != expected_hash:
+            raise DistributionError(f"Wheel RECORD SHA-256 mismatch: {name}")
+        if not size_value.isascii() or not size_value.isdigit():
+            raise DistributionError(f"Wheel RECORD size is invalid: {name}")
+        if int(size_value) != len(data):
+            raise DistributionError(f"Wheel RECORD size mismatch: {name}")
 
 
 def validate_wheel(path: Path, expected_version: str) -> WheelInfo:
@@ -496,12 +596,18 @@ def validate_wheel(path: Path, expected_version: str) -> WheelInfo:
     )
 
 
+def _toml_table(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, dict):
+        raise DistributionError(f"{label} must be a TOML table")
+    return value
+
+
 def _validate_pyproject(data: bytes, expected_version: str) -> None:
     try:
         project = tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise DistributionError(f"Sdist pyproject.toml is invalid: {error}") from error
-    build_system = project.get("build-system", {})
+    build_system = _toml_table(project.get("build-system", {}), "build-system")
     if build_system.get("requires") != BUILD_REQUIRES:
         raise DistributionError(
             f"Sdist build-system.requires must be {BUILD_REQUIRES!r}"
@@ -510,7 +616,7 @@ def _validate_pyproject(data: bytes, expected_version: str) -> None:
         raise DistributionError(
             f"Sdist build-system.build-backend must be {BUILD_BACKEND!r}"
         )
-    metadata = project.get("project", {})
+    metadata = _toml_table(project.get("project", {}), "project")
     if metadata.get("name") != PROJECT_NAME:
         raise DistributionError("Sdist pyproject.toml project Name is incorrect")
     if metadata.get("version") != expected_version:
@@ -519,7 +625,7 @@ def _validate_pyproject(data: bytes, expected_version: str) -> None:
         raise DistributionError("Sdist pyproject.toml Requires-Python is incorrect")
     if metadata.get("license") != LICENSE_EXPRESSION:
         raise DistributionError("Sdist pyproject.toml license must be MIT")
-    scripts = metadata.get("scripts", {})
+    scripts = _toml_table(metadata.get("scripts", {}), "project.scripts")
     if scripts.get(CONSOLE_SCRIPT) != CONSOLE_TARGET:
         raise DistributionError(
             f"Sdist pyproject.toml must define {CONSOLE_SCRIPT} = {CONSOLE_TARGET}"
@@ -555,7 +661,7 @@ def validate_sdist(path: Path, expected_version: str) -> SdistInfo:
 
 
 def _sdist_target(root: Path, member_name: str) -> Path:
-    relative = _sdist_member_path(member_name).parts[1:]
+    relative = _archive_member_path(member_name).parts[1:]
     target = root.joinpath(*relative)
     if not target.resolve().is_relative_to(root.resolve()):
         raise DistributionError(
@@ -564,11 +670,15 @@ def _sdist_target(root: Path, member_name: str) -> Path:
     return target
 
 
-def _sha256_stream(stream: BinaryIO) -> tuple[int, str]:
+def _sha256_stream(stream: BinaryIO, max_bytes: int) -> tuple[int, str]:
+    if max_bytes < 0:
+        raise DistributionError("Unsafe negative size for SHA-256 stream")
     digest = hashlib.sha256()
     size = 0
-    while chunk := stream.read(1024 * 1024):
+    while chunk := stream.read(min(READ_CHUNK_SIZE, max_bytes - size + 1)):
         size += len(chunk)
+        if size > max_bytes:
+            raise DistributionError("SHA-256 stream exceeds its declared size limit")
         digest.update(chunk)
     return size, digest.hexdigest()
 
@@ -580,7 +690,7 @@ def _archive_member_digest(
     if source is None:
         raise DistributionError(f"Unable to read sdist member: {member.name}")
     with source:
-        content = _sha256_stream(source)
+        content = _sha256_stream(source, member.size)
     if content[0] != member.size:
         raise DistributionError(f"Sdist archive member size mismatch: {member.name}")
     return content
@@ -596,11 +706,38 @@ def _verify_extracted_sdist_content(
                 f"Extracted sdist member is not a regular file: {identity}"
             )
         with target.open("rb") as stream:
-            extracted_content = _sha256_stream(stream)
+            extracted_content = _sha256_stream(stream, archived_content[0])
         if extracted_content != archived_content:
             raise DistributionError(
                 f"Extracted sdist content mismatch (SHA-256/size): {identity}"
             )
+
+
+def _scan_sdist_archive(
+    path: Path,
+) -> tuple[str, dict[str, tuple[int, str]]]:
+    inventory = _ArchiveInventory(
+        "Sdist",
+        MAX_SDIST_MEMBERS,
+        MAX_SDIST_MEMBER_BYTES,
+        MAX_SDIST_UNCOMPRESSED_BYTES,
+    )
+    roots = set()
+    expected_contents = {}
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive:
+            identity = inventory.add(member.name, member.size, is_dir=member.isdir())
+            root = _archive_member_path(member.name).parts[0]
+            roots.add(root)
+            if len(roots) > 1:
+                raise DistributionError("Sdist must contain exactly one project root")
+            if not (member.isfile() or member.isdir()):
+                raise DistributionError(f"Unsafe sdist member type: {member.name}")
+            if member.isfile():
+                expected_contents[identity] = _archive_member_digest(archive, member)
+    if len(roots) != 1 or not expected_contents:
+        raise DistributionError("Sdist must contain one project root with files")
+    return roots.pop(), expected_contents
 
 
 def extract_sdist(path: Path, destination: Path) -> Path:
@@ -610,40 +747,25 @@ def extract_sdist(path: Path, destination: Path) -> Path:
         raise DistributionError(f"Expected a .tar.gz sdist artifact: {path}")
     destination = Path(destination)
     try:
+        root_name, expected_contents = _scan_sdist_archive(path)
+        root = destination / root_name
+        if root.exists() or root.is_symlink():
+            raise DistributionError(
+                f"Sdist extraction destination already exists: {root}"
+            )
+        destination.mkdir(parents=True, exist_ok=True)
+        if root.resolve().parent != destination.resolve():
+            raise DistributionError(
+                f"Sdist extraction root resolves outside its destination: {root}"
+            )
         with tarfile.open(path, "r:gz") as archive:
-            members = archive.getmembers()
-            _validate_sdist_members(members)
-            roots = {_sdist_member_path(member.name).parts[0] for member in members}
-            if len(roots) != 1:
-                raise DistributionError("Sdist must contain exactly one project root")
-            root = destination / roots.pop()
-            if root.exists() or root.is_symlink():
-                raise DistributionError(
-                    f"Sdist extraction destination already exists: {root}"
-                )
-            destination.mkdir(parents=True, exist_ok=True)
-            if root.resolve().parent != destination.resolve():
-                raise DistributionError(
-                    f"Sdist extraction root resolves outside its destination: {root}"
-                )
-            for member in members:
-                _sdist_target(root, member.name)
-            expected_contents = {
-                str(_sdist_member_path(member.name)): _archive_member_digest(
-                    archive, member
-                )
-                for member in members
-                if member.isfile()
-            }
-            # Members are bounded and tarfile's data filter rejects unsafe metadata.
+            # The first pass bounded every member; data_filter rejects unsafe metadata.
             archive.extractall(  # nosec B202
                 path=destination, filter=tarfile.data_filter
             )
-            if not root.is_dir() or root.is_symlink():
-                raise DistributionError(f"Sdist extraction root is invalid: {root}")
-            for member in members:
-                _sdist_target(root, member.name)
-            _verify_extracted_sdist_content(root, expected_contents)
+        if not root.is_dir() or root.is_symlink():
+            raise DistributionError(f"Sdist extraction root is invalid: {root}")
+        _verify_extracted_sdist_content(root, expected_contents)
     except DistributionError:
         raise
     except (EOFError, OSError, tarfile.TarError) as error:
@@ -659,7 +781,8 @@ def project_version(path: Path) -> str:
         raise DistributionError(
             f"Unable to read project pyproject.toml: {error}"
         ) from error
-    version = project.get("project", {}).get("version")
+    metadata = _toml_table(project.get("project", {}), "project")
+    version = metadata.get("version")
     if not isinstance(version, str) or not version:
         raise DistributionError("Project pyproject.toml has no valid project version")
     return version
