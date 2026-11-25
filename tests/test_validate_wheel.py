@@ -1,5 +1,7 @@
 """Synthetic wheel and sdist contracts for the release distribution validator."""
 
+import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -75,9 +77,27 @@ def wheel_files(**overrides):
     return files
 
 
+def record_hash(data):
+    digest = hashlib.sha256(data).digest()
+    return "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
 def record_contents(files):
     rows = ["path,hash,size"]
-    rows.extend(f"{name},," for name in files)
+    rows.extend(
+        f"{name},{record_hash(data)},{len(data)}" for name, data in files.items()
+    )
+    rows.append(f"{DIST_INFO}/RECORD,,")
+    return "\n".join(rows).encode() + b"\n"
+
+
+def record_with_fields(files, target, hash_value, size_value):
+    rows = ["path,hash,size"]
+    for name, data in files.items():
+        if name == target:
+            rows.append(f"{name},{hash_value},{size_value}")
+        else:
+            rows.append(f"{name},{record_hash(data)},{len(data)}")
     rows.append(f"{DIST_INFO}/RECORD,,")
     return "\n".join(rows).encode() + b"\n"
 
@@ -318,6 +338,154 @@ def test_wheel_rejects_unsafe_member_names(validator, tmp_path, relative_path):
 
 
 @pytest.mark.parametrize(
+    ("constant", "size_delta"),
+    [
+        ("MAX_WHEEL_BYTES", -1),
+        ("MAX_WHEEL_MEMBERS", -1),
+        ("MAX_WHEEL_MEMBER_BYTES", -1),
+        ("MAX_WHEEL_UNCOMPRESSED_BYTES", -1),
+    ],
+)
+def test_wheel_enforces_archive_resource_limits(
+    validator, tmp_path, monkeypatch, constant, size_delta
+):
+    files = wheel_files()
+    wheel = write_wheel(tmp_path, files=files)
+    sizes = {
+        "MAX_WHEEL_BYTES": wheel.stat().st_size,
+        "MAX_WHEEL_MEMBERS": len(files) + 1,
+        "MAX_WHEEL_MEMBER_BYTES": max(len(data) for data in files.values()),
+        "MAX_WHEEL_UNCOMPRESSED_BYTES": sum(len(data) for data in files.values()),
+    }
+    monkeypatch.setattr(validator, constant, sizes[constant] + size_delta)
+
+    with pytest.raises(ValueError, match="wheel|Wheel|limit|size|members"):
+        validator.validate_wheel(wheel, VERSION)
+
+
+def test_wheel_accepts_exact_archive_resource_limits(validator, tmp_path, monkeypatch):
+    files = wheel_files()
+    wheel = write_wheel(tmp_path, files=files)
+    monkeypatch.setattr(validator, "MAX_WHEEL_BYTES", wheel.stat().st_size)
+    monkeypatch.setattr(validator, "MAX_WHEEL_MEMBERS", len(files) + 1)
+    with zipfile.ZipFile(wheel) as archive:
+        member_sizes = [member.file_size for member in archive.infolist()]
+    monkeypatch.setattr(validator, "MAX_WHEEL_MEMBER_BYTES", max(member_sizes))
+    monkeypatch.setattr(validator, "MAX_WHEEL_UNCOMPRESSED_BYTES", sum(member_sizes))
+
+    assert validator.validate_wheel(wheel, VERSION).version == VERSION
+
+
+def test_wheel_reads_members_without_unbounded_archive_read(
+    validator, tmp_path, monkeypatch
+):
+    wheel = write_wheel(tmp_path)
+
+    def forbidden_read(*args, **kwargs):
+        raise AssertionError("ZipFile.read must not be used")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", forbidden_read)
+
+    assert validator.validate_wheel(wheel, VERSION).version == VERSION
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        f"{PROJECT_NAME}/case.txt",
+        f"{PROJECT_NAME}/caf\u00e9.txt",
+        f"{PROJECT_NAME}/trailing space ",
+        f"{PROJECT_NAME}/trailing dot.",
+        f"{PROJECT_NAME}/C:drive.txt",
+        f"{PROJECT_NAME}/COM\u00b9.txt",
+        f"{PROJECT_NAME}/LPT\u00b9.txt",
+    ],
+)
+def test_wheel_rejects_casefold_nfc_and_windows_unsafe_names(
+    validator, tmp_path, extra
+):
+    files = wheel_files()
+    if extra.endswith("case.txt"):
+        files[f"{PROJECT_NAME}/CASE.txt"] = b"collision\n"
+    if extra.endswith("caf\u00e9.txt"):
+        files[f"{PROJECT_NAME}/cafe\u0301.txt"] = b"collision\n"
+    files[extra] = b"unsafe\n"
+    wheel = write_wheel(tmp_path, files=files)
+
+    with pytest.raises(ValueError, match="collision|Windows|casefold|NFC"):
+        validator.validate_wheel(wheel, VERSION)
+
+
+def test_wheel_rejects_file_directory_collisions(validator, tmp_path):
+    files = wheel_files(
+        **{
+            f"{PROJECT_NAME}/collision": b"file\n",
+            f"{PROJECT_NAME}/collision/child.txt": b"child\n",
+        }
+    )
+    wheel = write_wheel(tmp_path, files=files)
+
+    with pytest.raises(ValueError, match="collision"):
+        validator.validate_wheel(wheel, VERSION)
+
+
+def test_wheel_rejects_windows_83_alias_collisions(validator, tmp_path):
+    files = wheel_files(
+        **{
+            f"{PROJECT_NAME}/README~10.MD": b"alias\n",
+            f"{PROJECT_NAME}/README-long.md": b"long\n",
+        }
+    )
+    wheel = write_wheel(tmp_path, files=files)
+
+    with pytest.raises(ValueError, match="8\\.3|alias.*collision"):
+        validator.validate_wheel(wheel, VERSION)
+
+
+@pytest.mark.parametrize(
+    ("hash_value", "size_value"),
+    [
+        ("", "10"),
+        ("sha256=not-base64!", "10"),
+        ("sha256=" + "A" * 43 + "=", "10"),
+        ("sha512=" + "A" * 43, "10"),
+        ("sha256=" + "A" * 43, ""),
+        ("sha256=" + "A" * 43, "999"),
+    ],
+)
+def test_wheel_rejects_empty_or_incorrect_record_hash_and_size(
+    validator, tmp_path, hash_value, size_value
+):
+    files = wheel_files()
+    target = f"{PROJECT_NAME}/__init__.py"
+    record = record_with_fields(files, target, hash_value, size_value)
+    wheel = write_wheel(
+        tmp_path,
+        files={**files, f"{DIST_INFO}/RECORD": record},
+        record=False,
+    )
+
+    with pytest.raises(ValueError, match="RECORD"):
+        validator.validate_wheel(wheel, VERSION)
+
+
+def test_wheel_rejects_content_changed_after_record_creation(validator, tmp_path):
+    original = wheel_files()
+    files = dict(original)
+    target = f"{PROJECT_NAME}/__init__.py"
+    files[target] = b"tampered content\n"
+    record = record_contents(original)
+    wheel = write_wheel(
+        tmp_path,
+        files={**files, f"{DIST_INFO}/RECORD": record},
+        record=False,
+    )
+
+    with pytest.raises(ValueError, match="RECORD"):
+        validator.validate_wheel(wheel, VERSION)
+
+
+@pytest.mark.parametrize(
     "relative_path",
     [
         f"{SDIST_ROOT}/pyproject.toml",
@@ -385,6 +553,46 @@ def test_sdist_rejects_inconsistent_pyproject(validator, tmp_path, old, new):
     )
 
     with pytest.raises(ValueError, match="pyproject|build-system|Name|Version"):
+        validator.validate_sdist(sdist, VERSION)
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        b'build-system = "not-a-table"\n[project]\nname = "markdown2docx"\n',
+        b'build-system = []\n[project]\nname = "markdown2docx"\n',
+        (
+            b'project = "not-a-table"\n[build-system]\n'
+            b'requires = ["hatchling==1.33.0"]\n'
+            b'build-backend = "hatchling.build"\n'
+        ),
+        (
+            b"project = []\n[build-system]\n"
+            b'requires = ["hatchling==1.33.0"]\n'
+            b'build-backend = "hatchling.build"\n'
+        ),
+        (
+            b'[build-system]\nrequires = ["hatchling==1.33.0"]\n'
+            b'build-backend = "hatchling.build"\n[project]\n'
+            b'name = "markdown2docx"\nversion = "0.2.0"\n'
+            b'license = "MIT"\nrequires-python = ">=3.14"\n'
+            b'scripts = "not-a-table"\n'
+        ),
+        (
+            b'[build-system]\nrequires = ["hatchling==1.33.0"]\n'
+            b'build-backend = "hatchling.build"\n[project]\n'
+            b'name = "markdown2docx"\nversion = "0.2.0"\n'
+            b'license = "MIT"\nrequires-python = ">=3.14"\nscripts = []\n'
+        ),
+    ],
+)
+def test_sdist_rejects_non_table_toml_sections(validator, tmp_path, pyproject):
+    sdist = write_sdist(
+        tmp_path,
+        files=sdist_files(**{f"{SDIST_ROOT}/pyproject.toml": pyproject}),
+    )
+
+    with pytest.raises(validator.DistributionError, match="table|mapping"):
         validator.validate_sdist(sdist, VERSION)
 
 
@@ -565,6 +773,7 @@ def test_sdist_extraction_rejects_file_directory_collisions(validator, tmp_path)
         ("PYPROJ~1.TOM", "pyproject.toml"),
         ("README~1.MD", "README-long.md"),
         ("CONFIG~2.CON", "configuration-long.conf"),
+        ("README~10.MD", "README-long.md"),
         ("PROJEC~1/pyproject.toml", "project-long/pyproject.toml"),
     ],
 )
@@ -614,6 +823,48 @@ def test_sdist_extraction_allows_alias_candidates_in_different_directories(
     root = validator.extract_sdist(sdist, tmp_path / "extracted")
 
     assert (root / "first/PYPROJ~1.TOM").read_bytes() == b"alias\n"
+
+
+@pytest.mark.parametrize("operation", ["validate", "extract"])
+def test_sdist_never_materializes_members_with_getmembers(
+    validator, tmp_path, monkeypatch, operation
+):
+    def forbidden_getmembers(self):
+        raise AssertionError("TarFile.getmembers must not be used")
+
+    monkeypatch.setattr(tarfile.TarFile, "getmembers", forbidden_getmembers)
+    sdist = write_sdist(tmp_path)
+
+    if operation == "validate":
+        assert validator.validate_sdist(sdist, VERSION).version == VERSION
+    else:
+        assert validator.extract_sdist(sdist, tmp_path / "extracted").is_dir()
+
+
+def test_sdist_member_reads_are_bounded(validator, tmp_path, monkeypatch):
+    original_read = tarfile.ExFileObject.read
+
+    def bounded_read(self, size=-1):
+        assert 0 <= size <= 1024 * 1024
+        return original_read(self, size)
+
+    monkeypatch.setattr(tarfile.ExFileObject, "read", bounded_read)
+    sdist = write_sdist(tmp_path)
+
+    assert validator.validate_sdist(sdist, VERSION).version == VERSION
+
+
+def test_sdist_enforces_single_member_size_limit(validator, tmp_path, monkeypatch):
+    contents = sdist_files()
+    monkeypatch.setattr(
+        validator,
+        "MAX_SDIST_MEMBER_BYTES",
+        max(len(data) for data in contents.values()) - 1,
+    )
+    sdist = write_sdist(tmp_path, files=contents)
+
+    with pytest.raises(ValueError, match="member|size|limit"):
+        validator.validate_sdist(sdist, VERSION)
 
 
 def test_sdist_extraction_enforces_entry_count_limit(validator, tmp_path, monkeypatch):
@@ -877,6 +1128,14 @@ def test_project_version_comes_from_pyproject(validator, tmp_path):
     project.write_bytes(PYPROJECT)
 
     assert validator.project_version(project) == VERSION
+
+
+def test_project_version_rejects_non_table_project(validator, tmp_path):
+    project = tmp_path / "pyproject.toml"
+    project.write_text('project = "not-a-table"\n', encoding="utf-8")
+
+    with pytest.raises(validator.DistributionError, match="table|mapping"):
+        validator.project_version(project)
 
 
 def test_sdist_rebuild_uses_only_the_wheel_target(validator, tmp_path):
