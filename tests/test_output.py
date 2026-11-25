@@ -1,7 +1,9 @@
 """Regression coverage for output namespace attacks and atomic publication."""
 
+import ntpath
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from docx import Document
@@ -12,6 +14,10 @@ from markdown2docx.converter import MarkdownToDocxConverter
 from markdown2docx.exceptions import ConversionError, TemplateError, ValidationError
 from markdown2docx.output import staged_docx_output
 from markdown2docx.templates import DocxTemplateManager
+
+posix_only = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX directory descriptor, rename, and symlink semantics"
+)
 
 
 @pytest.fixture(name="render", params=["conversion", "template"])
@@ -50,6 +56,7 @@ def render_docx_fixture(request, monkeypatch, tmp_path):
     return run
 
 
+@posix_only
 @pytest.mark.parametrize("existing", [False, True])
 def test_leaf_symlink_never_changes_target(render, tmp_path, existing):
     """Reject live and dangling leaf links without modifying their targets."""
@@ -64,6 +71,7 @@ def test_leaf_symlink_never_changes_target(render, tmp_path, existing):
     assert target.read_text() == "protected" if existing else not target.exists()
 
 
+@posix_only
 @pytest.mark.parametrize("existing", [False, True])
 def test_parent_symlink_is_rejected(render, tmp_path, existing):
     """Reject linked ancestors before creating output directories."""
@@ -77,11 +85,7 @@ def test_parent_symlink_is_rejected(render, tmp_path, existing):
     assert not (protected / "nested").exists()
 
 
-pytestmark = pytest.mark.skipif(
-    os.name == "nt", reason="POSIX directory descriptor race tests"
-)
-
-
+@posix_only
 def test_leaf_swap_during_generation_preserves_target(render, tmp_path):
     """A link planted during generation must not redirect the write."""
     protected = tmp_path / "protected.txt"
@@ -97,6 +101,7 @@ def test_leaf_swap_during_generation_preserves_target(render, tmp_path):
     assert not list(tmp_path.glob(".markdown2docx-*"))
 
 
+@posix_only
 def test_parent_swap_during_generation_cannot_redirect_write(render, tmp_path):
     """A replaced parent cannot change the pinned publication directory."""
     parent = tmp_path / "output"
@@ -135,6 +140,7 @@ def test_missing_directories_are_created(render, tmp_path):
     assert Document(output) is not None
 
 
+@posix_only
 def test_symlink_swap_at_atomic_replace_never_follows_target(monkeypatch, tmp_path):
     """A last-instant link is replaced as an entry, not followed."""
     output = tmp_path / "report.docx"
@@ -226,6 +232,7 @@ def test_relative_output_path(monkeypatch, tmp_path):
     assert output.read_bytes() == b"document"
 
 
+@posix_only
 def test_unsupported_platform_fails_closed(monkeypatch, tmp_path):
     """Never fall back to race-prone pathname writes."""
     monkeypatch.setattr(os, "supports_dir_fd", set())
@@ -246,3 +253,256 @@ def test_writer_ignores_untrusted_tmpdir(monkeypatch, tmp_path):
         assert temporary not in stage.parents
         stage.write_bytes(b"document")
     assert output.read_bytes() == b"document"
+
+
+@pytest.fixture
+def reference_docx(tmp_path):
+    """Create a valid reference document for output-identity checks."""
+    path = tmp_path / "reference.docx"
+    Document().save(str(path))
+    return path
+
+
+@pytest.fixture
+def collision_guards(monkeypatch):
+    """Fail if collision validation reaches Pandoc or font auditing."""
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    with (
+        patch(
+            "markdown2docx.converter.run_pandoc",
+            side_effect=AssertionError("Pandoc ran before collision validation"),
+        ) as pandoc,
+        patch(
+            "markdown2docx.converter.FontResolver.audit_family",
+            side_effect=AssertionError("Font audit ran before collision validation"),
+        ) as font_audit,
+    ):
+        yield pandoc, font_audit
+
+
+def _assert_no_conversion_side_effects(guards):
+    pandoc, font_audit = guards
+    pandoc.assert_not_called()
+    font_audit.assert_not_called()
+
+
+def test_convert_rejects_default_output_equal_to_docx_input(collision_guards, tmp_path):
+    """A Markdown input named .docx must not become its own default output."""
+    source = tmp_path / "input.docx"
+    original = b"# Markdown input\n"
+    source.write_bytes(original)
+
+    with pytest.raises(
+        ConversionError, match="Input and output paths must be different"
+    ):
+        MarkdownToDocxConverter().convert(source)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert source.read_bytes() == original
+
+
+def test_convert_rejects_explicit_output_equal_to_input(collision_guards, tmp_path):
+    """Explicit input/output identity must fail before conversion starts."""
+    source = tmp_path / "input.docx"
+    original = b"# Markdown input\n"
+    source.write_bytes(original)
+
+    with pytest.raises(
+        ConversionError, match="Input and output paths must be different"
+    ):
+        MarkdownToDocxConverter().convert(source, source)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert source.read_bytes() == original
+
+
+def test_convert_rejects_output_equal_to_reference_template(
+    collision_guards, reference_docx, tmp_path
+):
+    """Publishing output must never replace the reference template."""
+    source = tmp_path / "input.md"
+    source.write_bytes(b"# Markdown input\n")
+    original = reference_docx.read_bytes()
+    converter = MarkdownToDocxConverter(reference_doc=reference_docx)
+
+    with pytest.raises(
+        ConversionError,
+        match="Output path must be different from the reference template",
+    ):
+        converter.convert(source, reference_docx)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert reference_docx.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("protected_kind", "output_name", "message"),
+    [
+        ("input", "input.docx", "Input and output paths must be different"),
+        (
+            "template",
+            "reference.docx",
+            "Output path must be different from the reference template",
+        ),
+    ],
+)
+def test_convert_rejects_relative_parent_output_alias(
+    collision_guards,
+    reference_docx,
+    tmp_path,
+    monkeypatch,
+    protected_kind,
+    output_name,
+    message,
+):
+    """Relative paths with .. must not alias an input or reference document."""
+    source = tmp_path / ("input.docx" if protected_kind == "input" else "input.md")
+    source.write_bytes(b"# Markdown input\n")
+    protected = source if protected_kind == "input" else reference_docx
+    original = protected.read_bytes()
+    converter = MarkdownToDocxConverter(
+        reference_doc=reference_docx if protected_kind == "template" else None
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ConversionError, match=message):
+        converter.convert(source.name, Path("missing") / ".." / output_name)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert protected.read_bytes() == original
+
+
+@pytest.mark.parametrize("protected_kind", ["input", "template"])
+def test_convert_rejects_existing_hardlink_output_alias(
+    collision_guards, reference_docx, tmp_path, protected_kind
+):
+    """samefile must catch existing aliases that lexical normalization misses."""
+    source = tmp_path / ("input.docx" if protected_kind == "input" else "input.md")
+    source.write_bytes(b"# Markdown input\n")
+    protected = source if protected_kind == "input" else reference_docx
+    original = protected.read_bytes()
+    output = tmp_path / "output.docx"
+    try:
+        output.hardlink_to(protected)
+    except OSError as exc:
+        pytest.skip(f"Hard links are unavailable: {exc}")
+    converter = MarkdownToDocxConverter(
+        reference_doc=reference_docx if protected_kind == "template" else None
+    )
+    message = (
+        "Input and output paths must be different"
+        if protected_kind == "input"
+        else "Output path must be different from the reference template"
+    )
+
+    with pytest.raises(ConversionError, match=message):
+        converter.convert(source, output)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert protected.read_bytes() == original
+    assert output.read_bytes() == original
+
+
+def test_convert_rejects_casefolded_input_output_alias(
+    collision_guards, tmp_path, monkeypatch
+):
+    """Simulate Windows normcase folding on a case-sensitive host."""
+    source = tmp_path / "input.docx"
+    original = b"# Markdown input\n"
+    source.write_bytes(original)
+    output = tmp_path / "INPUT.DOCX"
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+
+    with pytest.raises(
+        ConversionError, match="Input and output paths must be different"
+    ):
+        MarkdownToDocxConverter().convert(source, output)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert source.read_bytes() == original
+
+
+@posix_only
+@pytest.mark.parametrize("protected_kind", ["input", "template"])
+def test_convert_allows_distinct_symlink_parent_paths(
+    tmp_path, monkeypatch, protected_kind
+):
+    """Resolve symlinks before .. so distinct legal files are not rejected."""
+    root = tmp_path / "root"
+    actual = root / "actual"
+    nested = actual / "nested"
+    nested.mkdir(parents=True)
+    alias = root / "alias"
+    alias.symlink_to(nested, target_is_directory=True)
+    name = "input.docx" if protected_kind == "input" else "reference.docx"
+    protected = actual / name
+    if protected_kind == "input":
+        protected.write_bytes(b"# Markdown input\n")
+        source = alias / ".." / name
+        reference = None
+    else:
+        Document().save(str(protected))
+        source = root / "source.md"
+        source.write_bytes(b"# Markdown input\n")
+        reference = alias / ".." / name
+    protected_original = protected.read_bytes()
+    source_original = source.read_bytes()
+    output = root / name
+    output.write_bytes(b"existing output")
+
+    class PandocReached(Exception):
+        pass
+
+    def reach_pandoc(*_args, **_kwargs):
+        raise PandocReached
+
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    monkeypatch.setattr("markdown2docx.converter.run_pandoc", reach_pandoc)
+    converter = MarkdownToDocxConverter(reference_doc=reference)
+
+    with pytest.raises(PandocReached):
+        converter.convert(source, output)
+
+    assert protected.read_bytes() == protected_original
+    assert source.read_bytes() == source_original
+    assert output.read_bytes() == b"existing output"
+
+
+def test_validate_output_path_ignores_missing_samefile(monkeypatch, tmp_path):
+    """A not-yet-created output is not an identity collision."""
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    source = tmp_path / "input.docx"
+    source.write_bytes(b"# Markdown input\n")
+    output = tmp_path / "output.docx"
+    converter = MarkdownToDocxConverter()
+
+    with patch(
+        "markdown2docx.converter.os.path.samefile",
+        side_effect=FileNotFoundError,
+    ):
+        converter._validate_output_path(output, str(source))
+
+
+def test_convert_wraps_samefile_oserror(collision_guards, tmp_path):
+    """Identity check failures other than missing files must fail closed."""
+    source = tmp_path / "input.docx"
+    source.write_bytes(b"# Markdown input\n")
+    output = tmp_path / "output.docx"
+    output.write_bytes(b"existing output")
+
+    with (
+        patch(
+            "markdown2docx.converter.os.path.samefile",
+            side_effect=PermissionError("denied"),
+        ),
+        pytest.raises(
+            ConversionError, match="Unable to compare output path identity"
+        ) as error,
+    ):
+        MarkdownToDocxConverter().convert(source, output)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert error.value.input_file == str(source)
+    assert isinstance(error.value.original_error, PermissionError)
+    assert source.read_bytes() == b"# Markdown input\n"
+    assert output.read_bytes() == b"existing output"
