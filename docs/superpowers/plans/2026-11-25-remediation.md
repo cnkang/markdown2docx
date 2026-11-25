@@ -62,10 +62,10 @@
 
 **Files:** `tests/test_output.py`, `tests/test_multilingual.py`, `.github/workflows/test.yml`
 
-- [ ] Replace module-level Windows skip with per-test POSIX markers.
-- [ ] Add Windows reparse-point, pinned-handle, no-overwrite, and failure-preservation tests.
-- [ ] Make CI report collected/skipped counts and fail on unexpected skips in `test_output.py`.
-- [ ] Run focused/full tests; commit `test: restore Windows output coverage`.
+- [x] Replace module-level Windows skip with per-test POSIX markers and a unified skip reason.
+- [x] Add Windows reparse-point, pinned-handle, no-overwrite, failure-preservation, and real casefold tests.
+- [x] Make CI upload JUnit and require the exact Windows output safety cases with no unexpected skips.
+- [x] Run focused/full tests (`414 passed, 8 skipped`) and `make quality`; final fix `72babf3`.
 
 ### Task 7: Bind release to same-SHA three-platform quality gates
 
