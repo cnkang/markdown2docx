@@ -305,7 +305,8 @@ def test_mixed_run_with_break_splits_fonts_and_preserves_order(tmp_path):
 
     path = generated_docx(
         tmp_path,
-        "<w:r><w:rPr><w:b/></w:rPr><w:t>English中文العربية</w:t><w:br/></w:r>",
+        '<w:r w:rsidRPr="00112233" w:rsidR="44556677" w:rsidDel="8899AABB">'
+        "<w:rPr><w:b/></w:rPr><w:t>English中文العربية</w:t><w:br/></w:r>",
     )
     document = MultilingualDocument(
         {"meta": {}, "blocks": []}, FontResolver(), lang="en"
@@ -328,6 +329,15 @@ def test_mixed_run_with_break_splits_fonts_and_preserves_order(tmp_path):
     ] == ["Noto Sans", "Noto Sans CJK SC", "Noto Sans Arabic"]
     assert all(run.find(W + "rPr/" + W + "b") is not None for run in text_runs)
     assert text_runs[-1].find(W + "rPr/" + W + "rtl").get(W + "val") == "1"
+    assert all(
+        run.attrib
+        == {
+            W + "rsidRPr": "00112233",
+            W + "rsidR": "44556677",
+            W + "rsidDel": "8899AABB",
+        }
+        for run in paragraph.findall(W + "r")
+    )
 
 
 def test_multiple_text_nodes_preserve_mixed_fonts_and_child_order(tmp_path):
@@ -431,7 +441,13 @@ def test_split_run_rejects_nested_text_it_cannot_safely_split(tmp_path):
     )
 
 
-def test_verify_output_rejects_swapped_run_text(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "corruption",
+    ["swap", "delete", "extra-unstyled", "extra-wrong-font"],
+)
+def test_verify_output_rejects_text_run_stream_corruption(
+    tmp_path, monkeypatch, corruption
+):
     from markdown2docx.multilingual import MultilingualDocument
 
     path = generated_docx(tmp_path, "<w:r><w:t>English中文</w:t></w:r>")
@@ -440,25 +456,139 @@ def test_verify_output_rejects_swapped_run_text(tmp_path, monkeypatch):
     )
     verify = document._verify_output
 
-    def swap_text_then_verify(candidate):
+    def corrupt_then_verify(candidate):
         with zipfile.ZipFile(candidate) as archive:
             xml = archive.read("word/document.xml")
         root = etree.fromstring(xml)
-        text_nodes = root.xpath("//w:r[w:t]/w:t", namespaces=NS)
-        text_nodes[0].text, text_nodes[1].text = (
-            text_nodes[1].text,
-            text_nodes[0].text,
-        )
+        paragraph = root.find(".//" + W + "p")
+        text_runs = root.xpath("//w:r[w:t]", namespaces=NS)
+        if corruption == "swap":
+            first = text_runs[0].find(W + "t")
+            second = text_runs[1].find(W + "t")
+            first.text, second.text = second.text, first.text
+        elif corruption == "delete":
+            paragraph.remove(text_runs[0])
+        else:
+            extra = etree.SubElement(paragraph, W + "r")
+            if corruption == "extra-wrong-font":
+                props = etree.SubElement(extra, W + "rPr")
+                fonts = etree.SubElement(props, W + "rFonts")
+                for slot in ("ascii", "hAnsi", "eastAsia", "cs"):
+                    fonts.set(W + slot, "Wrong Font")
+            etree.SubElement(extra, W + "t").text = "extra"
         with zipfile.ZipFile(candidate, "w") as archive:
             archive.writestr("word/document.xml", etree.tostring(root))
         verify(candidate)
 
-    monkeypatch.setattr(document, "_verify_output", swap_text_then_verify)
+    monkeypatch.setattr(document, "_verify_output", corrupt_then_verify)
     with pytest.raises(ValidationError) as error:
         document.apply(path)
     assert any(
-        "run text mismatch" in message for message in error.value.validation_errors
+        "run stream" in message
+        or "run text mismatch" in message
+        or "font coverage mismatch" in message
+        for message in error.value.validation_errors
     )
+
+
+def test_verify_output_independently_checks_actual_run_font(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t>English中文</w:t></w:r>")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    original = document._properties
+
+    def corrupt_cjk_font(run, spec):
+        if "中文" in "".join(run.xpath("./w:t/text()", namespaces=NS)):
+            spec = replace(spec, font="sans", script="Latin")
+        original(run, spec)
+
+    monkeypatch.setattr(document, "_properties", corrupt_cjk_font)
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any(
+        "font coverage mismatch" in message for message in error.value.validation_errors
+    )
+
+
+@pytest.mark.parametrize(
+    ("paragraph", "text"),
+    [
+        (
+            "<w:r><w:rPr><w:rStyle"
+            ' w:val="MD2Dunsafe"/></w:rPr><w:t>English中文</w:t></w:r>',
+            "English中文",
+        ),
+        (
+            "<w:r><w:rPr><w:rStyle"
+            ' w:val="MD2Dunsafe"/></w:rPr><w:rPr><w:b/></w:rPr>'
+            "<w:t>English</w:t></w:r>",
+            "English",
+        ),
+        (
+            "<w:r><w:rPr><w:rStyle"
+            ' w:val="MD2Dunsafe"/></w:rPr><w:t>English</w:t><w:br/></w:r>',
+            "English",
+        ),
+        (
+            "<w:r><w:rPr><w:rStyle"
+            ' w:val="MD2Dunsafe"/></w:rPr><w:t>English</w:t></w:r>raw',
+            "English",
+        ),
+    ],
+)
+def test_marker_runs_reject_unsafe_writer_output(tmp_path, paragraph, text):
+    from markdown2docx.multilingual import MultilingualDocument, RunContext
+
+    path = generated_docx(tmp_path, paragraph)
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    document.runs["MD2Dunsafe"] = RunContext(
+        text=text,
+        font="sans",
+        lang="en",
+        rtl=False,
+        paragraph_direction="ltr",
+        script="Latin",
+    )
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert error.value.output_file == str(path)
+    assert any(
+        "marker run" in message.lower() for message in error.value.validation_errors
+    )
+
+
+def test_split_run_rejects_unmanaged_run_tail(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t>English中文</w:t></w:r>raw")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any(
+        "cannot safely split run" in message.lower()
+        for message in error.value.validation_errors
+    )
+
+
+def test_split_run_preserves_safe_whitespace_run_tail(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t>English中文</w:t></w:r> ")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    document.apply(path)
+    paragraph = parts(path)["word/document.xml"].find(".//" + W + "p")
+    assert paragraph[-1].tail == " "
 
 
 def test_multilingual_hyperlink_keeps_character_style(tmp_path):
