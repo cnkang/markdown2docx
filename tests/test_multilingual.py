@@ -553,29 +553,95 @@ def test_verify_output_rejects_regional_cjk_font_corruption(
     )
 
 
-def test_mark_records_paragraph_context():
+def test_custom_heading_font_is_verified_independently(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    resolver = FontResolver()
+    resolver.aliases["heading"] = "mono"
+    assert resolver.resolve("heading").family != resolver.resolve("sans").family
+    document = MultilingualDocument({"meta": {}, "blocks": []}, resolver, lang="en")
+    document._role = "heading"
+    document._mark("Heading", "en", "Heading", "ltr")
+    marker = next(iter(document.runs))
+    document._role = "body"
+    path = generated_docx(
+        tmp_path,
+        f'<w:r><w:rPr><w:rStyle w:val="{marker}"/></w:rPr>'
+        "<w:t>Heading</w:t></w:r><w:r><w:t>Body</w:t></w:r>",
+    )
+    document.apply(path)
+    runs = parts(path)["word/document.xml"].xpath("//w:r[w:t]", namespaces=NS)
+    families = [run.find(W + "rPr/" + W + "rFonts").get(W + "ascii") for run in runs]
+    assert families == [resolver.resolve("heading").family, "Noto Sans"]
+
+
+@pytest.mark.parametrize(
+    ("text", "wrong_font"),
+    [("123", "arabic"), ("→", "sans"), ("。", "sans")],
+)
+def test_verify_output_rejects_neutral_text_font_corruption(
+    tmp_path, monkeypatch, text, wrong_font
+):
+    from dataclasses import replace
+
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, f"<w:r><w:t>{text}</w:t></w:r>")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    original = document._properties
+
+    def corrupt_font(run, spec):
+        if "".join(run.xpath("./w:t/text()", namespaces=NS)) == text:
+            spec = replace(spec, font=wrong_font)
+        original(run, spec)
+
+    monkeypatch.setattr(document, "_properties", corrupt_font)
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any(
+        "font coverage mismatch" in message for message in error.value.validation_errors
+    )
+
+
+def test_mark_uses_regional_cjk_font_for_shared_han(tmp_path):
     from markdown2docx.multilingual import MultilingualDocument
 
     document = MultilingualDocument(
-        {"meta": {}, "blocks": []}, FontResolver(), lang="zh-Hant"
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
     )
-    document._mark("中文", "zh-Hant", "前言 中文", "ltr")
-    spec = next(iter(document.runs.values()))
-    assert getattr(spec, "context", None) == "前言 中文"
+    document._mark("中文", "en", "ひらがな中文", "ltr")
+    marker = next(iter(document.runs))
+    path = generated_docx(
+        tmp_path,
+        f'<w:r><w:rPr><w:rStyle w:val="{marker}"/></w:rPr><w:t>中文</w:t></w:r>',
+    )
+    document.apply(path)
+    run = parts(path)["word/document.xml"].xpath("//w:r[w:t]", namespaces=NS)[0]
+    assert run.find(W + "rPr/" + W + "rFonts").get(W + "eastAsia") == (
+        "Noto Sans CJK JP"
+    )
 
 
-def test_split_run_records_paragraph_context(tmp_path):
+def test_split_run_uses_paragraph_context_for_shared_han(tmp_path):
     from markdown2docx.multilingual import MultilingualDocument
 
-    path = generated_docx(tmp_path, "<w:r><w:t>English中文</w:t></w:r>")
+    path = generated_docx(
+        tmp_path,
+        "<w:r><w:t>ひらがな</w:t></w:r><w:r><w:t>中文</w:t></w:r>",
+    )
     document = MultilingualDocument(
         {"meta": {}, "blocks": []}, FontResolver(), lang="en"
     )
     document.apply(path)
-    expected_runs, _ = document._expected_parts["word/document.xml"]
-    assert expected_runs
-    assert all(
-        getattr(spec, "context", None) == "English中文" for spec in expected_runs
+    run = next(
+        run
+        for run in parts(path)["word/document.xml"].iter(W + "r")
+        if "中文" in "".join(run.xpath("./w:t/text()", namespaces=NS))
+    )
+    assert run.find(W + "rPr/" + W + "rFonts").get(W + "eastAsia") == (
+        "Noto Sans CJK JP"
     )
 
 
@@ -621,6 +687,57 @@ def test_legal_drawing_textbox_run_is_accepted(tmp_path):
     assert root.xpath(
         "//w:drawing/w:txbxContent/w:p/w:r/w:t/text()", namespaces=NS
     ) == ["Textbox English"]
+
+
+@pytest.mark.parametrize(
+    "paragraph",
+    [
+        pytest.param("<w:r><w:t/><w:t>English中文</w:t><w:t/></w:r>", id="mixed"),
+        pytest.param("<w:r><w:t/></w:r>", id="empty-only"),
+    ],
+)
+def test_empty_text_nodes_are_ignored_safely(tmp_path, paragraph):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, paragraph)
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    assert document.apply(path)["text_integrity"] == "passed"
+    text_runs = [
+        run
+        for run in parts(path)["word/document.xml"].iter(W + "r")
+        if any((node.text or "") for node in run.findall(W + "t"))
+    ]
+    assert ["".join(run.xpath("./w:t/text()", namespaces=NS)) for run in text_runs] == (
+        ["English", "中文"] if "English" in paragraph else []
+    )
+
+
+def test_verify_output_rejects_missing_xml_space(tmp_path, monkeypatch):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t> English</w:t></w:r>")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    verify = document._verify_output
+    xml_space = "{http://www.w3.org/XML/1998/namespace}space"
+
+    def remove_space_then_verify(candidate):
+        with zipfile.ZipFile(candidate) as archive:
+            xml = archive.read("word/document.xml")
+        root = etree.fromstring(xml)
+        for node in root.xpath("//w:r[w:t]/w:t", namespaces=NS):
+            node.attrib.pop(xml_space, None)
+        with zipfile.ZipFile(candidate, "w") as archive:
+            archive.writestr("word/document.xml", etree.tostring(root))
+        verify(candidate)
+
+    monkeypatch.setattr(document, "_verify_output", remove_space_then_verify)
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any("xml:space" in message for message in error.value.validation_errors)
 
 
 @pytest.mark.parametrize(
