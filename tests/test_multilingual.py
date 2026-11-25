@@ -29,7 +29,8 @@ def parts(path):
         }
 
 
-BIDI_CONTROLS = "\u2066\u2067\u2069"
+BIDI_CONTROLS = "\u2066\u2067\u2068\u2069"
+ISOLATE_STARTS = {"\u2066": "ltr", "\u2067": "rtl", "\u2068": "auto"}
 
 
 def paragraph_text(paragraph):
@@ -37,8 +38,9 @@ def paragraph_text(paragraph):
 
 
 def bidi_scopes(paragraph):
-    """Group logical text by isolate scope and serialized run direction."""
+    """Group exact text by a nested Unicode isolate stack and run direction."""
     scopes = [[]]
+    stack = [0]
     for run in paragraph.iter(W + "r"):
         text = "".join(run.xpath("./w:t/text()", namespaces=NS))
         if not text:
@@ -49,17 +51,15 @@ def bidi_scopes(paragraph):
             rtl.get(W + "val") if rtl is not None else None,
             cs.get(W + "val") if cs is not None else None,
         )
-        buffered = []
         for char in text:
-            if char in BIDI_CONTROLS:
-                if buffered:
-                    scopes[-1].append(("".join(buffered), *direction))
-                    buffered = []
+            if char in ISOLATE_STARTS:
                 scopes.append([])
+                stack.append(len(scopes) - 1)
+            elif char == "\u2069":
+                if len(stack) > 1:
+                    stack.pop()
             else:
-                buffered.append(char)
-        if buffered:
-            scopes[-1].append(("".join(buffered), *direction))
+                scopes[stack[-1]].append((char, *direction))
 
     result = []
     for scope in scopes:
@@ -69,12 +69,27 @@ def bidi_scopes(paragraph):
                 merged[-1] = (merged[-1][0] + text, rtl, cs)
             else:
                 merged.append((text, rtl, cs))
-        fragments = [
-            (text.strip(), rtl, cs) for text, rtl, cs in merged if text.strip()
-        ]
-        if fragments:
-            result.append(fragments)
+        if merged:
+            result.append(merged)
     return result
+
+
+def test_bidi_scope_helper_tracks_nested_isolates_and_whitespace():
+    paragraph = etree.fromstring(
+        f'<w:p xmlns:w="{NS["w"]}"><w:r><w:rPr>'
+        '<w:rtl w:val="0"/><w:cs w:val="0"/></w:rPr>'
+        "<w:t>pre \u2067outer \u2066inner\u2069 tail\u2069 post</w:t>"
+        "</w:r></w:p>"
+    )
+
+    assert paragraph_text(paragraph) == (
+        "pre \u2067outer \u2066inner\u2069 tail\u2069 post"
+    )
+    assert bidi_scopes(paragraph) == [
+        [("pre  post", "0", "0")],
+        [("outer  tail", "0", "0")],
+        [("inner", "0", "0")],
+    ]
 
 
 def generated_docx(tmp_path, paragraph, name="generated.docx"):
@@ -225,6 +240,38 @@ def test_graphemes_and_arabic_numbers():
     )
 
 
+@pytest.mark.parametrize(("code", "key"), [(False, "sans"), (True, "mono")])
+def test_bidi_controls_are_separate_font_neutral_fragments(code, key):
+    controls = "\u2066\u2067\u2069"
+    assert fragments(controls, "ar", "ABC", code=code) == [
+        (key, "\u2066", False, "Common"),
+        (key, "\u2067", False, "Common"),
+        (key, "\u2069", False, "Common"),
+    ]
+    assert fragments("\u2066ABC\u2069", "ar", "ABC", code=code) == [
+        (key, "\u2066", False, "Common"),
+        (key, "ABC", False, "Latin"),
+        (key, "\u2069", False, "Common"),
+    ]
+
+
+def test_heading_bidi_controls_use_sans_instead_of_heading_font():
+    from markdown2docx.multilingual import MultilingualDocument
+
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="ar"
+    )
+    document._role = "heading"
+    document._mark("\u2066ABC\u2069", "ar", "ABC", "ltr")
+
+    assert [(spec.font, spec.script, spec.rtl) for spec in document.runs.values()] == [
+        ("sans", "Common", False),
+        ("heading", "Latin", False),
+        ("sans", "Common", False),
+    ]
+    assert document.scripts == {"Common", "Latin"}
+
+
 def test_text_structure_defers_text_coalescing():
     from markdown2docx.multilingual import TextStructure
 
@@ -264,6 +311,43 @@ def test_explicit_local_rtl_isolates_latin_without_forcing_run_rtl(tmp_path):
     assert bidi_scopes(paragraph) == [[("ABC", "0", "0")]]
 
 
+def test_arabic_language_latin_isolate_needs_no_arabic_font(tmp_path, monkeypatch):
+    import shutil
+
+    cache = tmp_path / "fonts"
+    cache.mkdir()
+    prepared = FontResolver(directories=[])
+    font = prepared.resolve("sans")
+    entry = prepared.manifest["fonts"]["sans"]
+    shutil.copyfile(font.path, cache / entry["filename"])
+    shutil.copyfile(
+        prepared.cache / entry["license_filename"], cache / entry["license_filename"]
+    )
+    resolver = FontResolver(cache=cache, offline=True, directories=[])
+    monkeypatch.setattr(
+        "markdown2docx.converter.FontResolver", lambda **kwargs: resolver
+    )
+    source = tmp_path / "direction.md"
+    source.write_text("[ABC]{dir=rtl}\n", encoding="utf-8")
+
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="ar", offline=True
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    assert {item["key"] for item in report.fonts} == {"sans"}
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
+    assert paragraph_text(paragraph) == "\u2067ABC\u2069"
+    assert {
+        run.find(W + "rPr/" + W + "rFonts").get(W + "ascii")
+        for run in paragraph.iter(W + "r")
+        if paragraph_text(run)
+    } == {resolver.resolve("sans").family}
+    assert not paragraph.xpath(".//w:r[w:t]/w:rPr/w:cs[@w:val='1']", namespaces=NS)
+
+
 def test_explicit_local_ltr_isolates_latin_in_arabic_paragraph(tmp_path):
     source = tmp_path / "direction.md"
     source.write_text("العربية [ABC 123.]{dir=ltr} العربية\n", encoding="utf-8")
@@ -278,9 +362,12 @@ def test_explicit_local_ltr_isolates_latin_in_arabic_paragraph(tmp_path):
     assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
     assert paragraph_text(paragraph) == "العربية \u2066ABC 123.\u2069 العربية"
     assert bidi_scopes(paragraph) == [
-        [("العربية", "1", "1")],
-        [("ABC", "0", "0"), ("123.", "0", "1")],
-        [("العربية", "1", "1")],
+        [
+            ("العربية", "1", "1"),
+            ("  ", "0", "1"),
+            ("العربية", "1", "1"),
+        ],
+        [("ABC", "0", "0"), (" 123.", "0", "1")],
     ]
 
 
@@ -298,10 +385,51 @@ def test_explicit_local_rtl_isolates_digits_without_forcing_run_rtl(tmp_path):
     assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
     assert paragraph_text(paragraph) == "العربية \u2067123.,!\u2069 العربية"
     assert bidi_scopes(paragraph) == [
-        [("العربية", "1", "1")],
+        [
+            ("العربية", "1", "1"),
+            ("  ", "0", "1"),
+            ("العربية", "1", "1"),
+        ],
         [("123.,!", "0", "1")],
-        [("العربية", "1", "1")],
     ]
+
+
+@pytest.mark.parametrize(
+    "control",
+    [chr(codepoint) for codepoint in range(0x202A, 0x202F)]
+    + [chr(codepoint) for codepoint in range(0x2066, 0x206A)],
+)
+@pytest.mark.parametrize("inline", ["text", "code"])
+def test_explicit_span_rejects_conflicting_direction_controls(control, inline):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    text = "ABC" + control
+    child = (
+        {"t": "Code", "c": [["", [], []], text]}
+        if inline == "code"
+        else {"t": "Str", "c": text}
+    )
+    document = MultilingualDocument(
+        {
+            "meta": {},
+            "blocks": [
+                {
+                    "t": "Para",
+                    "c": [
+                        {
+                            "t": "Span",
+                            "c": [["", [], [["dir", "rtl"]]], [child]],
+                        }
+                    ],
+                }
+            ],
+        },
+        FontResolver(),
+        lang="en",
+    )
+
+    with pytest.raises(ConfigurationError, match="bidi control"):
+        document.annotate()
 
 
 def test_explicit_span_isolate_wraps_spaces_and_soft_breaks(tmp_path):
@@ -312,6 +440,7 @@ def test_explicit_span_isolate_wraps_spaces_and_soft_breaks(tmp_path):
 
     assert paragraph_text(paragraph) == ("\u2067ABC DEF\u2069 \u2067GHI JKL\u2069")
     assert bidi_scopes(paragraph) == [
+        [(" ", "0", "0")],
         [("ABC DEF", "0", "0")],
         [("GHI JKL", "0", "0")],
     ]
@@ -330,10 +459,62 @@ def test_inline_code_uses_ltr_isolate_without_overriding_strong_script(tmp_path)
     assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
     assert paragraph_text(paragraph) == ("العربية \u2066ABC العربية 123\u2069 العربية")
     assert bidi_scopes(paragraph) == [
-        [("العربية", "1", "1")],
-        [("ABC", "0", "0"), ("العربية", "1", "1"), ("123", "0", "1")],
-        [("العربية", "1", "1")],
+        [
+            ("العربية", "1", "1"),
+            ("  ", "0", "1"),
+            ("العربية", "1", "1"),
+        ],
+        [("ABC ", "0", "0"), ("العربية", "1", "1"), (" 123", "0", "1")],
     ]
+
+
+def test_annotate_removes_span_dir_but_preserves_div_direction():
+    from markdown2docx.multilingual import MultilingualDocument
+
+    ast = {
+        "meta": {},
+        "blocks": [
+            {
+                "t": "Para",
+                "c": [
+                    {
+                        "t": "Span",
+                        "c": [["", [], [["dir", "rtl"]]], [{"t": "Str", "c": "ABC"}]],
+                    }
+                ],
+            },
+            {
+                "t": "Div",
+                "c": [
+                    ["", [], [["dir", "rtl"]]],
+                    [
+                        {
+                            "t": "Para",
+                            "c": [
+                                {
+                                    "t": "Span",
+                                    "c": [
+                                        ["", [], [["dir", "ltr"]]],
+                                        [{"t": "Str", "c": "DEF"}],
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                ],
+            },
+        ],
+    }
+    document = MultilingualDocument(ast, FontResolver(), lang="en")
+
+    document.annotate()
+
+    span = document.ast["blocks"][0]["c"][0]
+    div = document.ast["blocks"][1]
+    nested_span = div["c"][1][0]["c"][0]
+    assert "dir" not in dict(span["c"][0][2])
+    assert "dir" not in dict(nested_span["c"][0][2])
+    assert dict(div["c"][0][2])["dir"] == "rtl"
 
 
 def test_nested_span_and_div_directions_are_inherited_and_restored(tmp_path):
@@ -357,10 +538,37 @@ def test_nested_span_and_div_directions_are_inherited_and_restored(tmp_path):
         "\u2067DEF\u2069",
     ]
     assert [bidi_scopes(paragraph) for paragraph in paragraphs] == [
-        [[("outer", "0", "0")], [("inner", "0", "0")], [("tail", "0", "0")]],
+        [[("outer  tail", "0", "0")], [("inner", "0", "0")]],
         [[("ABC", "0", "0")]],
         [[("DEF", "0", "0")]],
     ]
+
+
+@pytest.mark.parametrize(
+    "note_definition",
+    ["", "```text\nABC\n```\n"],
+    ids=["empty-note", "code-leading-note"],
+)
+def test_directional_empty_or_code_leading_footnote_does_not_leak(
+    tmp_path, note_definition
+):
+    source = tmp_path / "direction.md"
+    source.write_text(
+        f"[[^n]]{{dir=rtl}} tail\n\n```text\nbody\n```\n\n[^n]: {note_definition}",
+        encoding="utf-8",
+    )
+
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="en", offline=True
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    roots = parts(report.output_path)
+    paragraph = roots["word/document.xml"].find(W + "body/" + W + "p")
+    assert paragraph_text(paragraph) == "\u2067\u2069 tail"
+    for root in roots.values():
+        assert not root.xpath("//w:pPr/w:bidi[@w:val='1']", namespaces=NS)
+        assert not root.xpath("//w:r[w:t]/w:rPr/w:rtl[@w:val='1']", namespaces=NS)
 
 
 def test_note_boundary_resets_outer_span_direction(tmp_path):
@@ -384,15 +592,17 @@ def test_note_boundary_resets_outer_span_direction(tmp_path):
     assert bidi_scopes(paragraph) == [[("outer", "0", "0")]]
     assert paragraph_text(footnote).strip() == "Latin footnote"
     assert footnote.find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
-    assert bidi_scopes(footnote) == [[("Latin footnote", "0", "0")]]
+    assert bidi_scopes(footnote) == [[(" Latin footnote", "0", "0")]]
 
 
 def test_table_footnote_and_inline_code_keep_isolated_direction(tmp_path):
     source = tmp_path / "direction.md"
     source.write_text(
+        "::: {dir=rtl}\n\n"
         "| [ABC]{dir=rtl} | `العربية 123` |\n"
         "|---|---|\n"
         "| [note[^n]]{dir=rtl} | plain |\n\n"
+        ":::\n\n"
         "[^n]: Footnote Latin\n",
         encoding="utf-8",
     )
@@ -417,16 +627,18 @@ def test_table_footnote_and_inline_code_keep_isolated_direction(tmp_path):
     assert [
         paragraph.find(W + "pPr/" + W + "bidi").get(W + "val")
         for paragraph in paragraphs
-    ] == ["0", "0", "0", "0"]
+    ] == ["1", "1", "1", "1"]
     assert [bidi_scopes(paragraph) for paragraph in paragraphs] == [
         [[("ABC", "0", "0")]],
-        [[("العربية", "1", "1"), ("123", "0", "1")]],
+        [[("العربية", "1", "1"), (" 123", "0", "1")]],
         [[("note", "0", "0")]],
         [[("plain", "0", "0")]],
     ]
     assert paragraph_text(footnote).strip() == "Footnote Latin"
-    assert footnote.find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
-    assert bidi_scopes(footnote) == [[("Footnote", "0", "0"), ("Latin", "0", "0")]]
+    assert footnote.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
+    assert bidi_scopes(footnote) == [
+        [(" ", "0", "1"), ("Footnote", "0", "0"), (" ", "0", "1"), ("Latin", "0", "0")]
+    ]
 
 
 def test_verify_output_rejects_removed_direction_isolates(tmp_path, monkeypatch):
