@@ -516,6 +516,95 @@ def test_verify_output_independently_checks_actual_run_font(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize(
+    ("lang", "paragraph"),
+    [
+        pytest.param("zh-Hant", "<w:r><w:t>中文</w:t></w:r>", id="zh-hant"),
+        pytest.param("ja", "<w:r><w:t>中文</w:t></w:r>", id="japanese"),
+        pytest.param(
+            "en",
+            "<w:r><w:t>ひらがな</w:t></w:r><w:r><w:t>中文</w:t></w:r>",
+            id="shared-han-paragraph-context",
+        ),
+    ],
+)
+def test_verify_output_rejects_regional_cjk_font_corruption(
+    tmp_path, monkeypatch, lang, paragraph
+):
+    from dataclasses import replace
+
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, paragraph)
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang=lang
+    )
+    original = document._properties
+
+    def corrupt_han_font(run, spec):
+        if "中文" in "".join(run.xpath("./w:t/text()", namespaces=NS)):
+            spec = replace(spec, font="cjk-sc", script="Han")
+        original(run, spec)
+
+    monkeypatch.setattr(document, "_properties", corrupt_han_font)
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any(
+        "font coverage mismatch" in message for message in error.value.validation_errors
+    )
+
+
+def test_mark_records_paragraph_context():
+    from markdown2docx.multilingual import MultilingualDocument
+
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="zh-Hant"
+    )
+    document._mark("中文", "zh-Hant", "前言 中文", "ltr")
+    spec = next(iter(document.runs.values()))
+    assert getattr(spec, "context", None) == "前言 中文"
+
+
+def test_split_run_records_paragraph_context(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t>English中文</w:t></w:r>")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    document.apply(path)
+    expected_runs, _ = document._expected_parts["word/document.xml"]
+    assert expected_runs
+    assert all(
+        getattr(spec, "context", None) == "English中文" for spec in expected_runs
+    )
+
+
+def test_verify_output_rejects_text_nested_in_run_properties(tmp_path, monkeypatch):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t>English</w:t></w:r>")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    verify = document._verify_output
+
+    def nest_text_then_verify(candidate):
+        with zipfile.ZipFile(candidate) as archive:
+            xml = archive.read("word/document.xml")
+        root = etree.fromstring(xml)
+        run = root.xpath("//w:r[w:t]", namespaces=NS)[0]
+        etree.SubElement(run.find(W + "rPr"), W + "t").text = "nested"
+        with zipfile.ZipFile(candidate, "w") as archive:
+            archive.writestr("word/document.xml", etree.tostring(root))
+        verify(candidate)
+
+    monkeypatch.setattr(document, "_verify_output", nest_text_then_verify)
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any("shape" in message.lower() for message in error.value.validation_errors)
+
+
+@pytest.mark.parametrize(
     ("paragraph", "text"),
     [
         (
@@ -559,6 +648,63 @@ def test_marker_runs_reject_unsafe_writer_output(tmp_path, paragraph, text):
     with pytest.raises(ValidationError) as error:
         document.apply(path)
     assert error.value.output_file == str(path)
+    assert any(
+        "marker run" in message.lower() for message in error.value.validation_errors
+    )
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        pytest.param("<w:t>nested</w:t>", id="text"),
+        pytest.param("<w:r><w:t>nested</w:t></w:r>", id="run"),
+    ],
+)
+def test_unmarked_run_rejects_text_nested_in_properties(tmp_path, nested):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(
+        tmp_path, f"<w:r><w:rPr>{nested}</w:rPr><w:t>English</w:t></w:r>"
+    )
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any(
+        "cannot safely split run" in message.lower()
+        for message in error.value.validation_errors
+    )
+
+
+@pytest.mark.parametrize(
+    "nested",
+    [
+        pytest.param("<w:t>nested</w:t>", id="text"),
+        pytest.param("<w:r><w:t>nested</w:t></w:r>", id="run"),
+    ],
+)
+def test_marker_run_rejects_text_nested_in_properties(tmp_path, nested):
+    from markdown2docx.multilingual import MultilingualDocument, RunContext
+
+    path = generated_docx(
+        tmp_path,
+        "<w:r><w:rPr><w:rStyle"
+        f' w:val="MD2Dunsafe"/>{nested}</w:rPr><w:t>English</w:t></w:r>',
+    )
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    document.runs["MD2Dunsafe"] = RunContext(
+        text="English",
+        font="sans",
+        lang="en",
+        rtl=False,
+        paragraph_direction="ltr",
+        script="Latin",
+    )
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
     assert any(
         "marker run" in message.lower() for message in error.value.validation_errors
     )
