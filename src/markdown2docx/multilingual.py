@@ -226,7 +226,7 @@ def _contains_direction_control(node: Any) -> bool:
     if not isinstance(node, dict):
         return False
     kind = node.get("t")
-    if kind == "Note":
+    if kind in {"Note", "Image"}:
         return False
     if kind == "Str":
         return DIRECTIONAL_CONTROL_PATTERN.search(str(node.get("c", ""))) is not None
@@ -823,6 +823,10 @@ class MultilingualDocument:
                 structure=structure,
             )
         if kind == "Code":
+            if DIRECTIONAL_CONTROL_PATTERN.search(content[1]):
+                raise ConfigurationError(
+                    "dir", "Inline code cannot contain bidi controls"
+                )
             text = f"{LTR_ISOLATE}{content[1]}{POP_DIRECTIONAL_ISOLATE}"
             if structure is not None:
                 structure.add_text(text)
@@ -941,7 +945,7 @@ class MultilingualDocument:
             expected_order.setdefault(story, []).append(marker)
         before: list[str] = []
         after: list[str] = []
-        code_text: list[str] = []
+        code_text: dict[str, list[str]] = {}
         entries = source_archive.infolist()
         parser = etree.XMLParser(resolve_entities=False, no_network=True)
         character_styles = {}
@@ -1024,7 +1028,7 @@ class MultilingualDocument:
                         event for event in paragraph_events if event is not None
                     )
                     if code:
-                        code_text.append(paragraph_text)
+                        code_text.setdefault(story, []).append(paragraph_text)
                     code_lang = (
                         self.code_languages[code_match[0].anchor]
                         if code_match is not None and code_match[0].anchor is not None
@@ -1216,8 +1220,13 @@ class MultilingualDocument:
             if observed_order.get(story, []) != expected_order.get(story, []):
                 failures.append(f"{story} marker run order mismatch")
         # Code paragraphs use line breaks instead of newline characters in w:t.
-        expected_code = "".join(self.code_blocks).replace("\n", "").replace("\r", "")
-        if "".join(code_text) != expected_code:
+        expected_code: dict[str, list[str]] = {}
+        for structure in self._structures:
+            if structure.code:
+                expected_code.setdefault(structure.story, []).append(
+                    "".join(event for event in structure.events if event is not None)
+                )
+        if code_text != expected_code:
             failures.append("code block text")
         if "".join(before) != "".join(after):
             failures.append("DOCX text changed during font assignment")
@@ -1536,7 +1545,11 @@ class MultilingualDocument:
         if len(parts) != 1:
             return None
         key = parts[0][0]
-        return "heading" if key == "sans" and spec.role == "heading" else key
+        return (
+            "heading"
+            if key == "sans" and spec.script != "Common" and spec.role == "heading"
+            else key
+        )
 
     def _split_run(
         self,
