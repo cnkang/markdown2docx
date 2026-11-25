@@ -138,7 +138,7 @@ uv run python scripts/validate_multilingual.py --offline --output-dir artifacts/
 uv run python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
 ```
 
-Actions 在 Linux、macOS、Windows 上执行转换和检查。临时 Linux runner 会安装已核实的样例字体，生成 PDF 和页面预览，检查 PDF 是否使用预期 CJK、阿拉伯及拉丁字体，上传 `multilingual-<OS>` 产物。人工仍需检查阿拉伯语连接、标点位置和分页。Word/LibreOffice 人工展示检查属于发布门槛；配置了 CI 不等于全部平台已经通过。
+Actions 在 Linux、macOS、Windows 上执行转换和检查。临时 Linux runner 会安装已核实的样例字体，生成 PDF 和页面预览，检查 PDF 是否使用预期 CJK、阿拉伯及拉丁字体。必需的 `evidence-<OS>` 产物包含 DOCX、JSON 报告、JUnit、覆盖率和分发文件；可选的 `preview-<OS>` 产物包含 Linux 页面预览。人工仍需检查阿拉伯语连接、标点位置和分页。Word/LibreOffice 人工展示检查属于发布门槛；配置了 CI 不等于全部平台已经通过。
 
 更多示例见 [examples](examples/README.md)，行为变化见 [CHANGELOG](CHANGELOG.md)。
 
@@ -156,6 +156,6 @@ Actions 在 Linux、macOS、Windows 上执行转换和检查。临时 Linux runn
 
 所有 CLI 模式使用同一转换流程；`--quiet` 不输出成功提示或 INFO，JSON stdout 仅包含结果。新建 CLI 模板默认没有样例正文，使用 `--template-sample` 显式添加。报告增加 `schema_version`、`conversion_id`、`timings` 和 `tools`，协议见 [JSON schema](src/markdown2docx/report_schema.json)。预览保存在 `generation-*` 子目录，按数字页号排序，失败不会删除上一批预览；消费者应使用报告里的路径。历史 generation 由使用方按保留策略清理。
 
-开发使用 uv 锁文件、Ruff、mypy、pytest 和 Bandit。`make quality` 与 pre-commit/CI 使用相同版本和扫描范围。先运行 `scripts/prepare_fonts.py` 准备已校验字体，再执行测试；测试中的 Python 下载必须显式 mock。CLI 子进程测试也依赖预先准备的字体缓存。默认 pytest 不生成覆盖率文件，CI 单独采集分支覆盖率。`scripts/benchmark_conversion.py` 输出字符分片和各转换阶段的重复测量中位数。
+开发使用 uv 锁文件、Ruff、mypy、pytest 和 Bandit。`make quality` 与 pre-commit/CI 使用相同版本和扫描范围；CI 同时运行 actionlint v1.7.7。先运行 `scripts/prepare_fonts.py` 准备已校验字体，再执行测试；测试中的 Python 下载必须显式 mock。CLI 子进程测试也依赖预先准备的字体缓存。默认 pytest 不生成覆盖率文件，CI 单独采集分支覆盖率。`scripts/benchmark_conversion.py` 输出字符分片和各转换阶段的重复测量中位数。
 
-CI 在三平台构建 wheel 并从仓库外的干净环境验收安装包，同时按 SHA-256 校验 Pandoc 资产。`Publish distribution` 是手动发布流程：在包含该 workflow 的已评审 `vX.Y.Z` tag 上启动，输入相同 release tag。发布流程先在触发 commit 上调用同一个可复用 `Test` workflow；`build` 等待质量检查、真实 Agent skill smoke 和 Linux/macOS/Windows 测试矩阵全部通过后，才构建并校验 wheel 与 sdist，随后进入 `publish`。先通过 TestPyPI，再选择 PyPI。仓库管理员需预先配置对应环境、必要人工审批和 PyPI Trusted Publisher；此代码变更不会自动发布。发布提供 OIDC 与产物来源证明。Agent 的固定执行包仍是先前已验收版本，功能更新应在新执行 commit 实际发布并验收后更新 pin。
+CI 在三平台构建 wheel 并从仓库外的干净环境验收安装包，同时按 SHA-256 校验 Pandoc 资产。必需的 JUnit、覆盖率、多语言、分发和 skill-smoke 产物缺失时门禁失败；页面预览仍为可选。`Publish distribution` 是手动发布流程：在包含该 workflow 的已评审 `vX.Y.Z` tag 上启动，输入相同 release tag。发布流程先在触发 commit 上调用同一个可复用 `Test` workflow；`build` 等待质量检查、真实 Agent skill smoke 和 Linux/macOS/Windows 测试矩阵全部通过后，才构建并校验 wheel 与 sdist，随后进入 `publish`。先通过 TestPyPI，再选择 PyPI。仓库管理员需预先配置对应环境、必要人工审批和 PyPI Trusted Publisher；此代码变更不会自动发布。发布提供 OIDC 与产物来源证明。Agent 的固定执行包仍是先前已验收版本，功能更新应在新执行 commit 实际发布并验收后更新 pin。

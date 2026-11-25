@@ -24,7 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Require a release tag
+      - id: require-release-tag
+        name: Require a release tag
         env:
           RELEASE_REF: ${{ inputs.release_ref }}
           RUN_REF: ${{ github.ref_name }}
@@ -38,19 +39,25 @@ jobs:
             echo "Dispatch this workflow on the reviewed release tag itself"
             exit 1
           fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+      - id: setup-uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         with:
           version: "0.12.23"
-      - name: Install checksum-pinned Pandoc for wheel smoke
+      - id: install-pandoc
+        name: Install checksum-pinned Pandoc for wheel smoke
         run: uv run --locked python scripts/install_pandoc.py --github-env
-      - name: Prepare verified fonts for wheel smoke
+      - id: prepare-fonts
+        name: Prepare verified fonts for wheel smoke
         run: uv run --locked python scripts/prepare_fonts.py
-      - name: Build wheel and sdist
+      - id: build-distribution
+        name: Build wheel and sdist
         run: uv build
-      - name: Verify tag version and distributions
+      - id: verify-distributions
+        name: Verify tag version and distributions
         env:
           RELEASE_REF: ${{ inputs.release_ref }}
         run: |
@@ -76,7 +83,10 @@ jobs:
           uv venv artifacts/wheel-env --python 3.14
           uv pip install --python artifacts/wheel-env/bin/python dist/*.whl
           uv run --locked python scripts/validate_wheel.py --python artifacts/wheel-env/bin/python
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      - id: distribution-artifacts
+        name: Upload required distribution artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: distribution
           path: dist/

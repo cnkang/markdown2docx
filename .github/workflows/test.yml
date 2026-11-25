@@ -17,15 +17,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+      - id: setup-uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         with:
           version: "0.12.23"
           enable-cache: true
-      - run: uv sync --locked --group dev --group test
-      - name: Smoke test agent skill launcher
+      - id: install-dependencies
+        run: uv sync --locked --group dev --group test
+      - id: launcher-contract
+        name: Smoke test agent skill launcher
         run: |
           uv run --locked python - <<'PY'
           import importlib.util
@@ -45,26 +49,37 @@ jobs:
           )
           PY
           uv run --locked pytest tests/test_skill.py
-      - run: make quality
-      - run: uv run --locked pre-commit run --all-files
+      - id: quality
+        run: make quality
+      - id: actionlint
+        name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - id: pre-commit
+        run: uv run --locked pre-commit run --all-files
   skill:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+      - id: setup-uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         with:
           version: "0.12.23"
           enable-cache: true
-      - name: Install dependencies
+      - id: install-dependencies
+        name: Install dependencies
         run: uv sync --locked --group dev
-      - name: Install checksum-pinned Pandoc
+      - id: install-pandoc
+        name: Install checksum-pinned Pandoc
         run: uv run --locked python scripts/install_pandoc.py --github-env
-      - name: Prepare verified fonts
+      - id: prepare-fonts
+        name: Prepare verified fonts
         run: uv run --locked python scripts/prepare_fonts.py
-      - name: Smoke test the real agent skill launcher
+      - id: skill-smoke
+        name: Smoke test the real agent skill launcher
         run: |
           set -e
           set -o pipefail
@@ -114,13 +129,14 @@ jobs:
           assert "minimal Markdown to DOCX conversion" in text, text
           print("Real agent skill launcher smoke passed")
           PY
-      - name: Upload agent skill smoke artifacts
+      - id: skill-smoke-artifacts
+        name: Upload required agent skill smoke artifacts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skill-smoke
           path: artifacts/skill-smoke/
-          if-no-files-found: warn
+          if-no-files-found: error
   test:
     needs: quality
     timeout-minutes: 25
@@ -135,31 +151,41 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Install uv
+      - id: setup-uv
+        name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.12.23"
           enable-cache: true
-      - name: Install dependencies
+      - id: install-dependencies
+        name: Install dependencies
         run: uv sync --locked --group dev
-      - name: Install checksum-pinned Pandoc
+      - id: install-pandoc
+        name: Install checksum-pinned Pandoc
         run: uv run --locked python scripts/install_pandoc.py --github-env
-      - name: Prepare verified fonts before offline tests
+      - id: prepare-fonts
+        name: Prepare verified fonts before offline tests
         run: uv run --locked python scripts/prepare_fonts.py
-      - name: Run regression and mixed-language tests
+      - id: matrix-test
+        name: Run regression and mixed-language tests
         run: uv run --locked pytest --cov=src --cov-branch --cov-report=xml --cov-report=term-missing --junitxml=artifacts/junit.xml
-      - name: Audit Windows test skips
+      - id: windows-junit-gate
+        name: Audit Windows test skips
         if: runner.os == 'Windows'
         run: uv run --locked python scripts/check_test_skips.py artifacts/junit.xml
-      - name: Validate the comprehensive Markdown fixture
+      - id: multilingual-validation
+        name: Validate the comprehensive Markdown fixture
         run: uv run --locked python scripts/validate_multilingual.py --offline --output-dir artifacts/multilingual
-      - name: Install rendering dependencies
+      - id: install-rendering-dependencies
+        name: Install rendering dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libreoffice-writer poppler-utils fontconfig
-      - name: Install verified fixture fonts in the disposable Linux runner
+      - id: install-linux-fixture-fonts
+        name: Install verified fixture fonts in the disposable Linux runner
         if: runner.os == 'Linux'
         run: |
           uv run --locked python - <<'PY'
@@ -173,10 +199,12 @@ jobs:
               shutil.copy2(font['path'], destination / Path(font['path']).name)
           PY
           fc-cache -f
-      - name: Render and verify expected PDF fonts
+      - id: render-multilingual
+        name: Render and verify expected PDF fonts
         if: runner.os == 'Linux'
         run: uv run --locked python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
-      - name: Build distribution and test installed wheel
+      - id: wheel-validation
+        name: Build distribution and test installed wheel
         run: |
           uv build --out-dir artifacts/dist
           uv venv artifacts/wheel-env --python 3.14
@@ -187,14 +215,24 @@ jobs:
           fi
           uv pip install --python "$WHEEL_PYTHON" artifacts/dist/*.whl
           uv run --locked python scripts/validate_wheel.py --python "$WHEEL_PYTHON"
-      - name: Upload DOCX, report and Linux page previews
+      - id: required-artifacts
+        name: Upload required test evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: multilingual-${{ runner.os }}
+          name: evidence-${{ runner.os }}
           path: |
-            artifacts/multilingual/
+            artifacts/multilingual/multilingual.docx
+            artifacts/multilingual/report.json
             artifacts/dist/
             artifacts/junit.xml
             coverage.xml
+          if-no-files-found: error
+      - id: preview-artifacts
+        name: Upload optional Linux page previews
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: preview-${{ runner.os }}
+          path: artifacts/multilingual/preview/
           if-no-files-found: warn
