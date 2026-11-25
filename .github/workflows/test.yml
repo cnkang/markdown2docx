@@ -65,6 +65,8 @@ jobs:
         run: uv run --locked python scripts/prepare_fonts.py
       - name: Smoke test the real agent skill launcher
         run: |
+          set -e
+          set -o pipefail
           mkdir -p artifacts/skill-smoke
           cat > artifacts/skill-smoke/input.md <<'MD'
           # Skill smoke
