@@ -26,11 +26,11 @@
 
 **Files:** `src/markdown2docx/multilingual.py`, `tests/test_multilingual.py`
 
-- [ ] Add failing tests for mixed-script runs containing `<w:br/>`, multiple `<w:t>`, and split fragments with edge spaces.
-- [ ] Implement text-node-aware splitting that preserves non-text children and order; fail closed when unsafe.
-- [ ] Set `xml:space="preserve"` where split text begins/ends with whitespace.
-- [ ] Verify final run font coverage against actual text.
-- [ ] Run focused and full tests; commit `fix: preserve mixed run fonts and whitespace`.
+- [x] Add failing tests for mixed-script runs containing `<w:br/>`, multiple `<w:t>`, split fragments with edge spaces, nested shapes, neutral text, heading roles, and empty text nodes.
+- [x] Implement text-node-aware splitting that preserves non-text children and order; fail closed when unsafe.
+- [x] Set and verify `xml:space="preserve"` where split text begins/ends with whitespace.
+- [x] Verify every serialized text run's order, text, shape, and independently derived font coverage.
+- [x] Run focused and full tests (`308 passed, 1 skipped`); final fix `a707604`.
 
 ### Task 3: Make text integrity ordered and structural
 
