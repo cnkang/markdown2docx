@@ -36,10 +36,10 @@
 
 **Files:** `src/markdown2docx/multilingual.py`, `tests/test_multilingual.py`
 
-- [ ] Add fault-injection tests for reordered runs, deleted spaces, lost hard breaks, merged/split paragraphs, and moved parts.
-- [ ] Replace marker-only aggregation with ordered marker/text/block verification.
-- [ ] Keep raw-content and emoji status semantics explicit.
-- [ ] Run focused/full tests; commit `fix: verify ordered DOCX text integrity`.
+- [x] Add fault-injection tests for reordered runs, deleted spaces, lost hard breaks, merged/split paragraphs, moved parts, code anchors, TOC, raw isolation, LineBlock, and DefinitionList.
+- [x] Replace marker-only aggregation with ordered marker/text/block verification and linear event assembly.
+- [x] Keep raw-content and emoji status semantics explicit and scoped.
+- [x] Run focused/full tests (`350 passed, 1 skipped`); final fix `107e65d`.
 
 ### Task 4: Honor explicit local direction
 
