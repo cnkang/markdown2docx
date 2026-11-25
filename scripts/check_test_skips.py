@@ -17,7 +17,8 @@ REQUIRED_WINDOWS_OUTPUT_CASES = (
     "test_windows_rejects_junction_output_parent",
     "test_windows_staged_output_pins_parent_directory",
     "test_windows_no_overwrite_preserves_existing_file",
-    "test_windows_writer_failure_preserves_existing_file",
+    "test_windows_writer_failure_preserves_existing_file[conversion]",
+    "test_windows_writer_failure_preserves_existing_file[template]",
     "test_windows_validation_failure_preserves_existing_file",
     "test_windows_rejects_real_casefolded_input_output_alias",
 )
@@ -49,7 +50,7 @@ def _skip_reason(skipped: ElementTree.Element) -> str:
 
 
 def find_unexpected_skips(junit_xml: Path, *, windows: bool) -> list[str]:
-    """Enforce Windows skips and require every dedicated output safety case."""
+    """Enforce Windows skips and require every exact output safety case name."""
     # pytest generates this local report; it is not external or user-supplied XML.
     root = ElementTree.parse(junit_xml).getroot()  # nosec B314
     if not windows:
@@ -61,12 +62,11 @@ def find_unexpected_skips(junit_xml: Path, *, windows: bool) -> list[str]:
     for case in root.iter("testcase"):
         test_file = _test_file(case)
         test_name = case.get("name", "<unnamed>")
-        base_name = test_name.partition("[")[0]
         is_output_test = test_file == OUTPUT_TEST_FILE
-        is_required = is_output_test and base_name in required
+        is_required = is_output_test and test_name in required
         skipped_cases = case.findall("skipped")
         if is_required:
-            seen_required.add(base_name)
+            seen_required.add(test_name)
         for skipped in skipped_cases:
             reason = _skip_reason(skipped)
             identity = f"{test_file}::{test_name}"
