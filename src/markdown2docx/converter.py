@@ -309,7 +309,11 @@ class MarkdownToDocxConverter:
                     family, allow_unverified=allow
                 )
         document = MultilingualDocument(
-            ast, resolver, lang=document_lang, base_direction=document_dir
+            ast,
+            resolver,
+            lang=document_lang,
+            base_direction=document_dir,
+            number_sections="--number-sections" in args,
         )
         document.code_size_pt = self.config.template.code_size_pt
         document.limits = self.config.limits

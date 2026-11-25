@@ -199,12 +199,24 @@ def text_of(node: Any) -> str:
 
 
 def _append_text(events: list[str | None], text: str) -> None:
-    if not text:
-        return
-    if events and events[-1] is not None:
-        events[-1] += text
-    else:
+    if text:
         events.append(text)
+
+
+def _coalesce_events(events: list[str | None]) -> list[str | None]:
+    result: list[str | None] = []
+    text: list[str] = []
+    for event in events:
+        if event is None:
+            if text:
+                result.append("".join(text))
+                text = []
+            result.append(None)
+        else:
+            text.append(event)
+    if text:
+        result.append("".join(text))
+    return result
 
 
 @dataclass
@@ -215,6 +227,7 @@ class TextStructure:
     events: list[str | None] = field(default_factory=list)
     code: bool = False
     anchor: str | None = None
+    raw: bool = False
 
     def add_text(self, text: str) -> None:
         _append_text(self.events, text)
@@ -244,14 +257,25 @@ def _nearest_paragraph(run: Any) -> Any:
     )
 
 
-def _paragraph_bookmark(paragraph: Any) -> str | None:
+def _paragraph_bookmark(paragraph: Any) -> tuple[str, str] | None:
     previous = paragraph.getprevious()
-    if previous is None or previous.tag != W + "bookmarkStart":
+    following = paragraph.getnext()
+    bookmark_id = previous.get(W + "id") if previous is not None else None
+    if (
+        previous is None
+        or previous.tag != W + "bookmarkStart"
+        or following is None
+        or following.tag != W + "bookmarkEnd"
+        or not bookmark_id
+        or bookmark_id != following.get(W + "id")
+    ):
         return None
-    return previous.get(W + "name", "").removeprefix("_")
+    return previous.get(W + "name", "").removeprefix("_"), bookmark_id
 
 
-def _paragraph_events(paragraph: Any) -> list[str | None]:
+def _paragraph_events(
+    paragraph: Any, *, skip_section_numbers: bool = False
+) -> list[str | None]:
     events: list[str | None] = []
     for element in paragraph.iter():
         if _nearest_paragraph(element) is not paragraph:
@@ -263,7 +287,11 @@ def _paragraph_events(paragraph: Any) -> list[str | None]:
             )
             style = run.find(W + "rPr/" + W + "rStyle") if run is not None else None
             # --number-sections adds a writer-generated prefix outside the AST.
-            if style is not None and style.get(W + "val") == "SectionNumber":
+            if (
+                skip_section_numbers
+                and style is not None
+                and style.get(W + "val") == "SectionNumber"
+            ):
                 continue
             _append_text(events, element.text or "")
         elif element.tag in {W + "br", W + "cr"} and element.get(W + "type") in {
@@ -271,7 +299,55 @@ def _paragraph_events(paragraph: Any) -> list[str | None]:
             "textWrapping",
         }:
             events.append(None)
-    return events
+    return _coalesce_events(events)
+
+
+def _code_candidates(
+    root: Any, code_bookmarks: dict[str, str]
+) -> list[tuple[str, str, Any]]:
+    candidates = []
+    for paragraph in root.iter(W + "p"):
+        bookmark = _paragraph_bookmark(paragraph)
+        if bookmark is None:
+            continue
+        name, bookmark_id = bookmark
+        anchor = code_bookmarks.get(name)
+        style = paragraph.find(W + "pPr/" + W + "pStyle")
+        if (
+            anchor is not None
+            and style is not None
+            and style.get(W + "val") in {"SourceCode", "CodeBlock"}
+        ):
+            candidates.append((anchor, bookmark_id, paragraph))
+    return candidates
+
+
+def _match_code_structures(
+    expected: list[TextStructure], candidates: list[tuple[str, str, Any]]
+) -> list[tuple[TextStructure, Any | None, str | None]]:
+    by_anchor: dict[str, list[tuple[str, str, Any]]] = {}
+    for candidate in candidates:
+        by_anchor.setdefault(candidate[0], []).append(candidate)
+    offsets: dict[str, int] = {}
+    matches = []
+    for structure in expected:
+        choices = by_anchor.get(structure.anchor or "", [])
+        offset = offsets.get(structure.anchor or "", 0)
+        selected = next(
+            (
+                index
+                for index in range(offset, len(choices))
+                if _paragraph_events(choices[index][2]) == structure.events
+            ),
+            offset,
+        )
+        if selected < len(choices):
+            _, bookmark_id, paragraph = choices[selected]
+            offsets[structure.anchor or ""] = selected + 1
+            matches.append((structure, paragraph, bookmark_id))
+        else:
+            matches.append((structure, None, None))
+    return matches
 
 
 @dataclass
@@ -297,6 +373,7 @@ class MultilingualDocument:
         *,
         lang: str | None,
         base_direction: str = "auto",
+        number_sections: bool = False,
     ) -> None:
         if base_direction not in {"auto", "ltr", "rtl"}:
             raise ConfigurationError("direction", "Direction must be auto, ltr or rtl")
@@ -304,6 +381,7 @@ class MultilingualDocument:
         self.resolver = resolver
         self.lang = language(lang)
         self.base_direction = base_direction
+        self.number_sections = number_sections
         self.runs: dict[str, RunContext] = {}
         self._marker_prefix = "MD2D" + uuid.uuid4().hex[:12]
         self.warnings: list[dict[str, str]] = []
@@ -360,8 +438,39 @@ class MultilingualDocument:
         return strip_emoji(text)
 
     def annotate(self, *, toc: bool = False) -> dict[str, Any]:
-        # Pandoc writes the metadata title block before the body.
-        for key in ("title", "subtitle", "author"):
+        toc_title = None
+        if toc:
+            title_key = self.lang or "en"
+            if title_key.startswith("zh"):
+                title_key = (
+                    "zh-Hant"
+                    if langcodes.Language.get(title_key).maximize().script == "Hant"
+                    else "zh-Hans"
+                )
+            else:
+                title_key = title_key.split("-")[0]
+            if title_key not in TOC_TITLES:
+                self.warn(
+                    "LABEL_LANGUAGE_FALLBACK",
+                    "Generated labels use English for this language",
+                )
+            title = TOC_TITLES.get(title_key, TOC_TITLES["en"])
+            existing = self.ast["meta"].get("toc-title")
+            if existing is None:
+                toc_title = {"t": "MetaInlines", "c": [{"t": "Str", "c": title}]}
+            elif existing.get("t") == "MetaString":
+                toc_title = {
+                    "t": "MetaInlines",
+                    "c": [{"t": "Str", "c": str(existing.get("c", ""))}],
+                }
+            else:
+                toc_title = existing
+            self.ast["meta"]["toc-title"] = toc_title
+        # Pandoc writes metadata and the TOC title before the body.
+        metadata_keys = ("title", "subtitle", "author")
+        if toc:
+            metadata_keys += ("toc-title",)
+        for key in metadata_keys:
             if key in self.ast["meta"]:
                 self.ast["meta"][key] = self._walk(
                     self.ast["meta"][key], self.lang, self.base_direction, "", "ltr"
@@ -377,35 +486,25 @@ class MultilingualDocument:
             self.ast["meta"]["dir"] = {"t": "MetaString", "c": self.base_direction}
         else:
             self.ast["meta"].pop("dir", None)
-        if not toc:
-            return self.ast
-        title_key = self.lang or "en"
-        if title_key.startswith("zh"):
-            title_key = (
-                "zh-Hant"
-                if langcodes.Language.get(title_key).maximize().script == "Hant"
-                else "zh-Hans"
+        if toc:
+            visible_title = text_of(toc_title) or title
+            self.resolver.resolve(
+                "sans",
+                (
+                    self._checked_text(visible_title)
+                    if title_key not in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}
+                    else ""
+                ),
             )
-        else:
-            title_key = title_key.split("-")[0]
-        if title_key not in TOC_TITLES:
-            self.warn(
-                "LABEL_LANGUAGE_FALLBACK",
-                "Generated labels use English for this language",
-            )
-        title = TOC_TITLES.get(title_key, TOC_TITLES["en"])
-        self.ast["meta"].setdefault("toc-title", {"t": "MetaString", "c": title})
-        self.resolver.resolve(
-            "sans",
-            (
-                self._checked_text(title)
-                if title_key not in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}
-                else ""
-            ),
-        )
-        if title_key in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}:
-            key = "arabic" if title_key == "ar" else cjk_key(title_key, title)[0]
-            self.resolver.resolve(key, self._checked_text(title))
+            if title_key in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}:
+                key = (
+                    "arabic"
+                    if title_key == "ar"
+                    else cjk_key(title_key, visible_title)[0]
+                )
+                self.resolver.resolve(key, self._checked_text(visible_title))
+        for structure in self._structures:
+            structure.events[:] = _coalesce_events(structure.events)
         return self.ast
 
     def _mark(
@@ -549,6 +648,59 @@ class MultilingualDocument:
                     story,
                 )
             return node
+        if kind == "LineBlock":
+            context = text_of(node)
+            pdir = inherited_dir if inherited_dir != "auto" else direction(context)
+            structure = TextStructure(story)
+            self._structures.append(structure)
+            lines = []
+            for index, line in enumerate(content):
+                if index:
+                    structure.add_break()
+                lines.append(
+                    self._walk(
+                        line,
+                        lang,
+                        inherited_dir,
+                        context,
+                        pdir,
+                        local_dir,
+                        structure,
+                        story,
+                    )
+                )
+            node["c"] = lines
+            return node
+        if kind == "DefinitionList":
+            entries = []
+            for term, definitions in content:
+                context = text_of(term)
+                pdir = inherited_dir if inherited_dir != "auto" else direction(context)
+                structure = TextStructure(story)
+                self._structures.append(structure)
+                term = self._walk(
+                    term,
+                    lang,
+                    inherited_dir,
+                    context,
+                    pdir,
+                    local_dir,
+                    structure,
+                    story,
+                )
+                definitions = self._walk(
+                    definitions,
+                    lang,
+                    inherited_dir,
+                    "",
+                    pdir,
+                    local_dir,
+                    None,
+                    story,
+                )
+                entries.append([term, definitions])
+            node["c"] = entries
+            return node
         if kind == "Str":
             if structure is not None:
                 structure.add_text(content)
@@ -587,7 +739,7 @@ class MultilingualDocument:
                 content[0][0] = f"{self._marker_prefix}CODE{len(self.code_blocks) - 1}"
             structure = TextStructure(story, code=True, anchor=content[0][0])
             code = content[1].replace("\r\n", "\n").replace("\r", "\n")
-            for index, line in enumerate(code.split("\n")):
+            for index, line in enumerate(code.splitlines()):
                 if index:
                     structure.add_break()
                 structure.add_text(line)
@@ -616,6 +768,10 @@ class MultilingualDocument:
             self.resolver.resolve("math")
             return node
         if kind in {"RawBlock", "RawInline"}:
+            if structure is not None:
+                structure.raw = True
+            else:
+                self._structures.append(TextStructure(story, raw=True))
             self.warn(
                 "RAW_CONTENT_UNVERIFIED",
                 "Raw content is outside text-integrity validation",
@@ -694,10 +850,6 @@ class MultilingualDocument:
         # Pandoc prefixes bookmark names with '_' and hashes names that Word
         # cannot use directly. These aliases preserve language for user IDs too.
         code_bookmarks = self._code_bookmarks()
-        bookmark_languages = {
-            alias: self.code_languages[identifier]
-            for alias, identifier in code_bookmarks.items()
-        }
         for info in entries:
             if info.filename.startswith("word/") and info.filename.endswith(".xml"):
                 if info.file_size > self.limits.xml_bytes:
@@ -710,6 +862,19 @@ class MultilingualDocument:
                         self.resolver.resolve("math", self._checked_text(value))
                 before.extend(root.xpath("//w:t/text()", namespaces=NS))
                 story = _story_for_part(info.filename)
+                expected_code = [
+                    item
+                    for item in self._structures
+                    if item.story == story and item.code
+                ]
+                code_matches = _match_code_structures(
+                    expected_code, _code_candidates(root, code_bookmarks)
+                )
+                code_paragraphs = {
+                    id(paragraph): (structure, bookmark_id)
+                    for structure, paragraph, bookmark_id in code_matches
+                    if paragraph is not None
+                }
                 paragraph_structures: dict[Any, TextStructure] = {}
                 for candidate in root.iter(W + "p"):
                     found: dict[int, TextStructure] = {}
@@ -726,18 +891,19 @@ class MultilingualDocument:
                     if len(found) == 1:
                         paragraph_structures[candidate] = next(iter(found.values()))
                 for paragraph in root.iter(W + "p"):
-                    bookmark = _paragraph_bookmark(paragraph)
-                    code_anchor = code_bookmarks.get(bookmark or "")
-                    code = code_anchor is not None
-                    paragraph_events = _paragraph_events(paragraph)
+                    code_match = code_paragraphs.get(id(paragraph))
+                    code = code_match is not None
+                    paragraph_events = _paragraph_events(
+                        paragraph, skip_section_numbers=self.number_sections
+                    )
                     paragraph_text = "".join(
                         event for event in paragraph_events if event is not None
                     )
                     if code:
                         code_text.append(paragraph_text)
                     code_lang = (
-                        bookmark_languages.get(bookmark or "", self.lang)
-                        if code
+                        self.code_languages[code_match[0].anchor]
+                        if code_match is not None and code_match[0].anchor is not None
                         else self.lang
                     )
                     marked_paragraph = False
@@ -1063,69 +1229,138 @@ class MultilingualDocument:
         expected_structures: list[TextStructure],
         failures: list[str],
     ) -> None:
-        if "RAW_CONTENT_UNVERIFIED" in self._warned:
-            return
         paragraphs = list(root.iter(W + "p"))
         paragraph_indices = {
             paragraph: index for index, paragraph in enumerate(paragraphs)
         }
-        expected_groups: list[TextStructure] = []
-        for spec in expected_runs:
-            if spec.structure is not None and (
-                not expected_groups or expected_groups[-1] is not spec.structure
-            ):
-                expected_groups.append(spec.structure)
-        actual_groups: list[int | None] = []
+        expected_groups: list[tuple[TextStructure, set[int]]] = []
+        for index, spec in enumerate(expected_runs):
+            if spec.structure is None:
+                continue
+            if not expected_groups or expected_groups[-1][0] is not spec.structure:
+                expected_groups.append((spec.structure, set()))
+            expected_groups[-1][1].add(index)
+        actual_groups: list[tuple[int | None, set[int]]] = []
         for index, run in enumerate(actual_runs[: len(expected_runs)]):
             if expected_runs[index].structure is None:
                 continue
             paragraph_index = paragraph_indices.get(_nearest_paragraph(run))
-            if not actual_groups or actual_groups[-1] != paragraph_index:
-                actual_groups.append(paragraph_index)
-        if len(actual_groups) != len(expected_groups):
-            failures.append(f"{name}: paragraph structure count mismatch")
-        else:
-            for expected, paragraph_index in zip(
-                expected_groups, actual_groups, strict=True
+            if not actual_groups or actual_groups[-1][0] != paragraph_index:
+                actual_groups.append((paragraph_index, set()))
+            actual_groups[-1][1].add(index)
+        actual_group_for_run = {
+            run_index: group_index
+            for group_index, (_, indices) in enumerate(actual_groups)
+            for run_index in indices
+        }
+        expected_group_for_run = {
+            run_index: group_index
+            for group_index, (_, indices) in enumerate(expected_groups)
+            for run_index in indices
+        }
+        for group_index, (expected, expected_indices) in enumerate(expected_groups):
+            overlaps = sorted(
+                {
+                    actual_group_for_run[index]
+                    for index in expected_indices
+                    if index in actual_group_for_run
+                }
+            )
+            actual_paragraphs = [actual_groups[index][0] for index in overlaps]
+            actual_events = [
+                _paragraph_events(
+                    paragraphs[paragraph_index],
+                    skip_section_numbers=self.number_sections,
+                )
+                if paragraph_index is not None
+                else None
+                for paragraph_index in actual_paragraphs
+            ]
+            if len(overlaps) != 1:
+                failures.append(
+                    f"{name}: paragraph group {group_index} paragraphs "
+                    f"{actual_paragraphs} structure count mismatch: "
+                    f"expected {expected.events!r}, actual {actual_events!r}"
+                )
+                continue
+            actual_group_index = overlaps[0]
+            paragraph_index, actual_indices = actual_groups[actual_group_index]
+            merged = len(
+                {
+                    expected_group_for_run[index]
+                    for index in actual_indices
+                    if index in expected_group_for_run
+                }
+            )
+            if merged != 1:
+                failures.append(
+                    f"{name}: paragraph group {group_index} paragraph "
+                    f"{paragraph_index} structure count mismatch: "
+                    f"expected {expected.events!r}, actual {actual_events!r}"
+                )
+                continue
+            if paragraph_index is None:
+                failures.append(
+                    f"{name}: paragraph group {group_index} parent mismatch: "
+                    f"expected events {expected.events!r}, actual no paragraph"
+                )
+                continue
+            if expected.raw:
+                continue
+            actual_events = _paragraph_events(
+                paragraphs[paragraph_index],
+                skip_section_numbers=self.number_sections,
+            )
+            # Pandoc separates footnote references from note text with a space.
+            if (
+                expected.story == "footnotes"
+                and actual_events
+                and isinstance(actual_events[0], str)
+                and actual_events[0].startswith(" ")
+                and not (
+                    expected.events
+                    and isinstance(expected.events[0], str)
+                    and expected.events[0].startswith(" ")
+                )
             ):
-                if paragraph_index is None:
-                    failures.append(f"{name}: paragraph structure parent mismatch")
-                    continue
-                actual_events = _paragraph_events(paragraphs[paragraph_index])
-                # Pandoc separates footnote references from note text with a space.
-                if (
-                    expected.story == "footnotes"
-                    and actual_events
-                    and isinstance(actual_events[0], str)
-                    and actual_events[0].startswith(" ")
-                    and not (
-                        expected.events
-                        and isinstance(expected.events[0], str)
-                        and expected.events[0].startswith(" ")
-                    )
-                ):
-                    actual_events[0] = actual_events[0][1:]
-                    if not actual_events[0]:
-                        actual_events.pop(0)
-                if actual_events != expected.events:
-                    failures.append(f"{name}: paragraph text structure mismatch")
+                actual_events[0] = actual_events[0][1:]
+                if not actual_events[0]:
+                    actual_events.pop(0)
+            if actual_events != expected.events:
+                failures.append(
+                    f"{name}: paragraph {paragraph_index} text structure mismatch: "
+                    f"expected {expected.events!r}, actual {actual_events!r}"
+                )
         expected_code = [item for item in expected_structures if item.code]
-        code_bookmarks = self._code_bookmarks()
-        actual_code = []
-        for paragraph in paragraphs:
-            anchor = code_bookmarks.get(_paragraph_bookmark(paragraph) or "")
-            if anchor is not None:
-                actual_code.append((anchor, paragraph))
-        if len(actual_code) != len(expected_code):
-            failures.append(f"{name}: code block structure count mismatch")
-        else:
-            for expected, (anchor, paragraph) in zip(
-                expected_code, actual_code, strict=True
-            ):
-                if anchor != expected.anchor:
-                    failures.append(f"{name}: code block anchor order mismatch")
-                elif _paragraph_events(paragraph) != expected.events:
-                    failures.append(f"{name}: code block line structure mismatch")
+        code_matches = _match_code_structures(
+            expected_code, _code_candidates(root, self._code_bookmarks())
+        )
+        previous_paragraph = -1
+        for code_index, (expected, paragraph, _) in enumerate(code_matches):
+            if paragraph is None:
+                failures.append(
+                    f"{name}: code block {code_index} missing paired SourceCode/CodeBlock "
+                    f"paragraph for expected anchor {expected.anchor!r}: "
+                    f"expected {expected.events!r}, actual []"
+                )
+                continue
+            paragraph_index = paragraph_indices[paragraph]
+            actual_events = _paragraph_events(
+                paragraph, skip_section_numbers=self.number_sections
+            )
+            if paragraph_index < previous_paragraph:
+                failures.append(
+                    f"{name}: code block {code_index} paragraph {paragraph_index} "
+                    f"anchor order mismatch: expected {expected.anchor!r} "
+                    f"events {expected.events!r}, actual {actual_events!r}"
+                )
+            previous_paragraph = paragraph_index
+            if actual_events != expected.events:
+                failures.append(
+                    f"{name}: code block {code_index} paragraph {paragraph_index} "
+                    f"line structure mismatch: expected {expected.events!r}, "
+                    f"actual {actual_events!r}"
+                )
 
     def _run_properties_contain_text(self, run: Any) -> bool:
         return any(
