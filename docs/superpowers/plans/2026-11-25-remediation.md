@@ -16,11 +16,11 @@
 
 **Files:** `src/markdown2docx/converter.py`, `tests/test_converter.py`, `tests/test_output.py`
 
-- [ ] Add failing tests for default output equal to a `.docx`-named Markdown input, explicit output equal to input, output equal to template, and relative path aliases.
-- [ ] Run `uv run --locked pytest tests/test_converter.py -q` and confirm the new tests fail.
-- [ ] Add normalized path and `samefile()` checks before Pandoc/font work.
-- [ ] Re-run focused tests, then `uv run --locked pytest -q`.
-- [ ] Commit `fix: reject input and template output collisions`.
+- [x] Add failing tests for default output equal to a `.docx`-named Markdown input, explicit output equal to input, output equal to template, and relative path aliases.
+- [x] Run `uv run --locked pytest tests/test_output.py -q` and confirm the new tests fail (`9 failed, 28 passed`).
+- [x] Add normalized path and `samefile()` checks before Pandoc/font work.
+- [x] Re-run focused tests, then `uv run --locked pytest -q` (`275 passed, 1 skipped`).
+- [x] Commit `fix: harden path identity checks` (`480912e`).
 
 ### Task 2: Split mixed runs safely and preserve whitespace
 
