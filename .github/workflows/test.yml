@@ -215,6 +215,9 @@ jobs:
           fi
           uv pip install --python "$WHEEL_PYTHON" artifacts/dist/*.whl
           uv run --locked python scripts/validate_wheel.py --python "$WHEEL_PYTHON"
+      - id: check-test-evidence
+        name: Verify required test evidence
+        run: uv run --locked python scripts/check_test_evidence.py
       - id: required-artifacts
         name: Upload required test evidence
         if: always()

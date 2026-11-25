@@ -101,18 +101,22 @@ jobs:
       attestations: write
       contents: read
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - id: download-distribution
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: distribution
           path: dist/
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      - id: attest-distribution
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
-      - name: Publish to TestPyPI
+      - id: publish-testpypi
+        name: Publish to TestPyPI
         if: inputs.repository == 'testpypi'
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:
           repository-url: https://test.pypi.org/legacy/
-      - name: Publish to PyPI
+      - id: publish-pypi
+        name: Publish to PyPI
         if: inputs.repository == 'pypi'
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
