@@ -298,10 +298,10 @@ def test_release_build_has_only_packaging_steps(release_workflow):
 def test_release_build_verifies_wheel_and_sdist(release_workflow):
     verify = step_by_id(release_workflow["jobs"]["build"], "verify-distributions")
 
-    assert "dist/*.whl" in verify["run"]
-    assert "scripts/validate_wheel.py" in verify["run"]
-    assert "*.tar.gz" in verify["run"]
-    assert "tarfile.open" in verify["run"]
+    assert "scripts/validate_wheel.py --dist-dir dist" in verify["run"]
+    assert '--expected-version "${RELEASE_REF#v}"' in verify["run"]
+    assert "uv venv" not in verify["run"]
+    assert "uv pip install" not in verify["run"]
 
 
 def test_release_build_and_reusable_jobs_check_out_github_sha(
