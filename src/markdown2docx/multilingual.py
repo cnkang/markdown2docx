@@ -567,9 +567,36 @@ class MultilingualDocument:
                         )
                         if marker in self.runs:
                             spec = self.runs[marker]
-                            observed[marker] = observed.get(marker, "") + "".join(
-                                run.xpath("./w:t/text()", namespaces=NS)
-                            )
+                            value = "".join(run.xpath("./w:t/text()", namespaces=NS))
+                            unsafe = self._validate_run_shape(run, value)
+                            if unsafe is None and any(
+                                child.tag not in {W + "rPr", W + "t"} for child in run
+                            ):
+                                unsafe = "marker run contains non-text children"
+                            if unsafe is None:
+                                parts = self._fragments(
+                                    value,
+                                    spec.lang,
+                                    paragraph_text,
+                                    code=spec.code,
+                                )
+                                if len(parts) != 1:
+                                    unsafe = "marker run contains mixed text fragments"
+                                else:
+                                    expected_key = self._font_key_for_text(value, spec)
+                                    if expected_key is None or (
+                                        self.resolver.resolve(expected_key).family
+                                        != self.resolver.resolve(spec.font).family
+                                    ):
+                                        unsafe = (
+                                            "marker run font does not cover its text"
+                                        )
+                            if unsafe:
+                                raise ValidationError(
+                                    str(path),
+                                    [f"Cannot safely process marker run: {unsafe}"],
+                                )
+                            observed[marker] = observed.get(marker, "") + value
                             if spec.character_style:
                                 style_id = character_styles.get(spec.character_style)
                                 if not style_id:
@@ -669,12 +696,18 @@ class MultilingualDocument:
                         font = etree.SubElement(math_pr, M + "mathFont")
                     font.set(M + "val", self.resolver.resolve("math").family)
                 after.extend(root.xpath("//w:t/text()", namespaces=NS))
+                expected_runs = []
+                for run in root.iter(W + "r"):
+                    if run.find(W + "t") is None:
+                        continue
+                    spec = self._styled_runs.get(run)
+                    if spec is None:
+                        raise ValidationError(
+                            str(path), ["Text run was not styled safely"]
+                        )
+                    expected_runs.append(spec)
                 self._expected_parts[info.filename] = (
-                    [
-                        (index, self._styled_runs[run])
-                        for index, run in enumerate(root.iter(W + "r"))
-                        if run in self._styled_runs
-                    ],
+                    expected_runs,
                     [
                         (index, self._paragraph_directions[paragraph])
                         for index, paragraph in enumerate(root.iter(W + "p"))
@@ -726,25 +759,44 @@ class MultilingualDocument:
                 expected_paragraphs,
             ) in self._expected_parts.items():
                 root = etree.fromstring(archive.read(name), parser)
-                runs = list(root.iter(W + "r"))
+                actual_runs = [
+                    run for run in root.iter(W + "r") if run.find(W + "t") is not None
+                ]
                 paragraphs = list(root.iter(W + "p"))
-                for index, spec in expected_runs:
-                    if index >= len(runs):
-                        failures.append(f"{name}: run text mismatch at index {index}")
+                if len(actual_runs) != len(expected_runs):
+                    failures.append(f"{name}: text run stream count mismatch")
+                for index, run in enumerate(actual_runs):
+                    if index >= len(expected_runs):
+                        failures.append(
+                            f"{name}: unexpected text run in stream at index {index}"
+                        )
                         continue
-                    actual_text = "".join(
-                        runs[index].xpath("./w:t/text()", namespaces=NS)
-                    )
+                    spec = expected_runs[index]
+                    actual_text = "".join(run.xpath("./w:t/text()", namespaces=NS))
                     if actual_text != spec.text:
-                        failures.append(f"{name}: run text mismatch at index {index}")
-                    props = runs[index].find(W + "rPr")
-                    family = self.resolver.resolve(spec.font).family
+                        failures.append(
+                            f"{name}: run text mismatch at stream index {index}"
+                        )
+                    expected_key = self._font_key_for_text(actual_text, spec)
+                    props = run.find(W + "rPr")
                     fonts = props.find(W + "rFonts") if props is not None else None
-                    if fonts is None or any(
-                        fonts.get(W + slot) != family
-                        for slot in ("ascii", "hAnsi", "eastAsia", "cs")
+                    if expected_key is None:
+                        failures.append(
+                            f"{name}: font coverage mismatch at stream index {index}"
+                        )
+                        continue
+                    family = self.resolver.resolve(expected_key).family
+                    if (
+                        family != self.resolver.resolve(spec.font).family
+                        or fonts is None
+                        or any(
+                            fonts.get(W + slot) != family
+                            for slot in ("ascii", "hAnsi", "eastAsia", "cs")
+                        )
                     ):
-                        failures.append(f"{name}: font properties mismatch")
+                        failures.append(
+                            f"{name}: font coverage mismatch at stream index {index}"
+                        )
                     for tag, expected in (
                         ("rtl", spec.rtl),
                         ("cs", spec.script == "Arabic"),
@@ -770,6 +822,49 @@ class MultilingualDocument:
         if failures:
             raise ValidationError(str(path), failures[:10])
 
+    def _validate_run_shape(self, run: Any, text: str) -> str | None:
+        text_children = run.findall(W + "t")
+        if run.getparent() is None:
+            return "run has no parent"
+        if not text_children:
+            return "run has no text nodes"
+        if len(run.findall(W + "rPr")) > 1:
+            return "run has multiple property nodes"
+        if any(len(child) for child in text_children):
+            return "text node contains nested markup"
+        if any(
+            child.tag not in {W + "rPr", W + "t"}
+            and any(
+                next(child.iter(tag), None) is not None for tag in (W + "r", W + "t")
+            )
+            for child in run
+        ):
+            return "run contains nested text runs"
+        if any(
+            (run.text and run.text.strip())
+            or (run.tail and run.tail.strip())
+            or (child.tail and child.tail.strip())
+            for child in run
+        ):
+            return "run contains unmanaged text"
+        if "".join(child.text or "" for child in text_children) != text:
+            return "run text does not match its text nodes"
+        return None
+
+    def _font_key_for_text(self, text: str, spec: RunContext) -> str | None:
+        if not any(
+            unicodedata.bidirectional(char) in {"L", "R", "AL"} for char in text
+        ):
+            return spec.font
+        parts = fragments(
+            text,
+            spec.lang,
+            text,
+            code=spec.code,
+            cjk=spec.font if spec.font.startswith("cjk") else None,
+        )
+        return parts[0][0] if len(parts) == 1 else None
+
     def _split_run(
         self,
         run: Any,
@@ -781,40 +876,17 @@ class MultilingualDocument:
         context: str,
     ) -> None:
         parts = self._fragments(text, lang, context, code=code)
-        if not parts:
-            return
-        parent = run.getparent()
-        text_children = run.findall(W + "t")
-        unsafe = None
-        if parent is None:
-            unsafe = "run has no parent"
-        elif not text_children:
-            unsafe = "run has no text nodes"
-        elif len(run.findall(W + "rPr")) > 1:
-            unsafe = "run has multiple property nodes"
-        elif any(len(child) for child in text_children):
-            unsafe = "text node contains nested markup"
-        elif any(
-            child.tag not in {W + "rPr", W + "t"}
-            and any(
-                next(child.iter(tag), None) is not None for tag in (W + "r", W + "t")
-            )
-            for child in run
-        ):
-            unsafe = "run contains nested text runs"
-        elif any(
-            (run.text and run.text.strip()) or (child.tail and child.tail.strip())
-            for child in run
-        ):
-            unsafe = "run contains unmanaged text"
-        elif "".join(child.text or "" for child in text_children) != text:
-            unsafe = "run text does not match its text nodes"
-        elif "".join(part for _, part, _, _ in parts) != text or any(
-            not part for _, part, _, _ in parts
+        unsafe = self._validate_run_shape(run, text)
+        if unsafe is None and (
+            "".join(part for _, part, _, _ in parts) != text
+            or any(not part for _, part, _, _ in parts)
         ):
             unsafe = "text fragments do not match the run"
         if unsafe:
             raise ValidationError(str(path), [f"Cannot safely split run: {unsafe}"])
+        if not parts:
+            return
+        parent = run.getparent()
         for key, part, _, _ in parts:
             self.resolver.resolve(key, self._checked_text(part))
         if len(parts) == 1:
@@ -829,6 +901,7 @@ class MultilingualDocument:
 
         def make_run(*children: Any) -> Any:
             clone = etree.Element(W + "r")
+            clone.attrib.update(run.attrib)
             props = run.find(W + "rPr")
             if props is not None:
                 clone.append(copy.deepcopy(props))
@@ -882,6 +955,8 @@ class MultilingualDocument:
         index = parent.index(run)
         for offset, replacement in enumerate(replacements):
             parent.insert(index + offset, replacement)
+        if replacements:
+            replacements[-1].tail = run.tail
         parent.remove(run)
 
     def _properties(self, run: Any, spec: RunContext) -> None:
