@@ -56,11 +56,12 @@ def bidi_scopes(paragraph):
                 scopes.append([])
                 stack.append(len(scopes) - 1)
             elif char == "\u2069":
-                if len(stack) > 1:
-                    stack.pop()
+                assert len(stack) > 1
+                stack.pop()
             else:
                 scopes[stack[-1]].append((char, *direction))
 
+    assert len(stack) == 1
     result = []
     for scope in scopes:
         merged = []
@@ -90,6 +91,16 @@ def test_bidi_scope_helper_tracks_nested_isolates_and_whitespace():
         [("outer  tail", "0", "0")],
         [("inner", "0", "0")],
     ]
+
+
+@pytest.mark.parametrize("text", ["\u2067ABC", "\u2069ABC"])
+def test_bidi_scope_helper_rejects_unbalanced_isolates(text):
+    paragraph = etree.fromstring(
+        f'<w:p xmlns:w="{NS["w"]}"><w:r><w:t>{text}</w:t></w:r></w:p>'
+    )
+
+    with pytest.raises(AssertionError):
+        bidi_scopes(paragraph)
 
 
 def generated_docx(tmp_path, paragraph, name="generated.docx"):
@@ -272,6 +283,45 @@ def test_heading_bidi_controls_use_sans_instead_of_heading_font():
     assert document.scripts == {"Common", "Latin"}
 
 
+def test_heading_control_runs_serialize_with_neutral_fonts(tmp_path, monkeypatch):
+    resolver = FontResolver()
+    resolver.aliases["heading"] = "mono"
+    body_font = resolver.resolve("sans").family
+    heading_font = resolver.resolve("heading").family
+    code_font = resolver.resolve("mono").family
+    assert heading_font != body_font
+    monkeypatch.setattr(
+        "markdown2docx.converter.FontResolver", lambda **kwargs: resolver
+    )
+    source = tmp_path / "heading.md"
+    source.write_text("# [ABC]{dir=rtl} `DEF`\n", encoding="utf-8")
+
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="en", offline=True
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
+    runs = [
+        (
+            "".join(run.xpath("./w:t/text()", namespaces=NS)),
+            run.find(W + "rPr/" + W + "rFonts").get(W + "ascii"),
+        )
+        for run in paragraph.iter(W + "r")
+        if paragraph_text(run)
+    ]
+    assert [(text, font) for text, font in runs if set(text) <= set(BIDI_CONTROLS)] == [
+        ("\u2067", body_font),
+        ("\u2069", body_font),
+        ("\u2066", code_font),
+        ("\u2069", code_font),
+    ]
+    assert next(font for text, font in runs if text == "ABC") == heading_font
+    assert next(font for text, font in runs if text == "DEF") == code_font
+
+
 def test_text_structure_defers_text_coalescing():
     from markdown2docx.multilingual import TextStructure
 
@@ -394,6 +444,29 @@ def test_explicit_local_rtl_isolates_digits_without_forcing_run_rtl(tmp_path):
     ]
 
 
+def test_image_alt_bidi_control_is_outside_body_direction_validation(tmp_path):
+    import base64
+
+    (tmp_path / "image.png").write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+    )
+    source = tmp_path / "direction.md"
+    source.write_text("[![alt\u2069](image.png)]{dir=rtl}\n", encoding="utf-8")
+
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="en", offline=True, restricted=True
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
+    assert paragraph_text(paragraph) == "\u2067\u2069"
+    assert "alt" not in paragraph_text(paragraph)
+
+
 @pytest.mark.parametrize(
     "control",
     [chr(codepoint) for codepoint in range(0x202A, 0x202F)]
@@ -430,6 +503,48 @@ def test_explicit_span_rejects_conflicting_direction_controls(control, inline):
 
     with pytest.raises(ConfigurationError, match="bidi control"):
         document.annotate()
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        pytest.param("`ABC\u2069`\n", id="standalone"),
+        pytest.param("::: {dir=rtl}\n\n`ABC\u2069`\n\n:::\n", id="directional-div"),
+        pytest.param("| `ABC\u2069` |\n|---|\n", id="table-cell"),
+        pytest.param("text[^n]\n\n[^n]: `ABC\u2069`\n", id="footnote"),
+    ],
+)
+def test_code_branch_rejects_directional_controls_in_every_scope(tmp_path, source_text):
+    source = tmp_path / "direction.md"
+    source.write_text(source_text, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="bidi control"):
+        MarkdownToDocxConverter().convert(source, lang="en", offline=True)
+
+
+def test_directional_span_and_div_allow_nested_inline_code(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text(
+        "::: {dir=rtl}\n\n[outer `ABC العربية 123` tail]{dir=ltr}\n\n:::\n",
+        encoding="utf-8",
+    )
+
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, lang="en", offline=True
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    paragraph = parts(report.output_path)["word/document.xml"].find(
+        W + "body/" + W + "p"
+    )
+    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
+    assert paragraph_text(paragraph) == (
+        "\u2066outer \u2066ABC العربية 123\u2069 tail\u2069"
+    )
+    assert bidi_scopes(paragraph) == [
+        [("outer  tail", "0", "0")],
+        [("ABC ", "0", "0"), ("العربية", "1", "1"), (" 123", "0", "1")],
+    ]
 
 
 def test_explicit_span_isolate_wraps_spaces_and_soft_breaks(tmp_path):
@@ -545,16 +660,17 @@ def test_nested_span_and_div_directions_are_inherited_and_restored(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "note_definition",
-    ["", "```text\nABC\n```\n"],
-    ids=["empty-note", "code-leading-note"],
+    "code_leading", [False, True], ids=["empty-note", "code-leading-note"]
 )
 def test_directional_empty_or_code_leading_footnote_does_not_leak(
-    tmp_path, note_definition
+    tmp_path, code_leading
 ):
     source = tmp_path / "direction.md"
+    footnote = "[^n]:\n"
+    if code_leading:
+        footnote += "    ```text\n    ABC\n    ```\n"
     source.write_text(
-        f"[[^n]]{{dir=rtl}} tail\n\n```text\nbody\n```\n\n[^n]: {note_definition}",
+        f"[[^n]]{{dir=rtl}} tail\n\n```text\nbody\n```\n\n{footnote}",
         encoding="utf-8",
     )
 
@@ -566,6 +682,11 @@ def test_directional_empty_or_code_leading_footnote_does_not_leak(
     roots = parts(report.output_path)
     paragraph = roots["word/document.xml"].find(W + "body/" + W + "p")
     assert paragraph_text(paragraph) == "\u2067\u2069 tail"
+    if code_leading:
+        code = roots["word/footnotes.xml"].xpath(
+            "//w:p[w:pPr/w:pStyle[@w:val='SourceCode']]", namespaces=NS
+        )
+        assert [paragraph_text(item) for item in code] == ["ABC"]
     for root in roots.values():
         assert not root.xpath("//w:pPr/w:bidi[@w:val='1']", namespaces=NS)
         assert not root.xpath("//w:r[w:t]/w:rPr/w:rtl[@w:val='1']", namespaces=NS)
