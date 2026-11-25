@@ -214,6 +214,7 @@ class TextStructure:
     story: str
     events: list[str | None] = field(default_factory=list)
     code: bool = False
+    anchor: str | None = None
 
     def add_text(self, text: str) -> None:
         _append_text(self.events, text)
@@ -243,9 +244,18 @@ def _nearest_paragraph(run: Any) -> Any:
     )
 
 
+def _paragraph_bookmark(paragraph: Any) -> str | None:
+    previous = paragraph.getprevious()
+    if previous is None or previous.tag != W + "bookmarkStart":
+        return None
+    return previous.get(W + "name", "").removeprefix("_")
+
+
 def _paragraph_events(paragraph: Any) -> list[str | None]:
     events: list[str | None] = []
     for element in paragraph.iter():
+        if _nearest_paragraph(element) is not paragraph:
+            continue
         if element.tag == W + "t":
             run = next(
                 (parent for parent in element.iterancestors() if parent.tag == W + "r"),
@@ -312,6 +322,16 @@ class MultilingualDocument:
         self._structures: list[TextStructure] = []
         self._expected_parts: dict[str, Any] = {}
         self._cjk_contexts: dict[tuple[str | None, str], tuple[str, bool]] = {}
+
+    def _code_bookmarks(self) -> dict[str, str]:
+        bookmarks: dict[str, str] = {}
+        for identifier in self.code_languages:
+            hashed = hashlib.sha1(
+                identifier.encode("utf-8"), usedforsecurity=False
+            ).hexdigest()[1:]
+            bookmarks[identifier] = identifier
+            bookmarks[hashed] = identifier
+        return bookmarks
 
     def _context_key(self, lang: str | None, context: str) -> tuple[str, bool]:
         identity = (lang, context)
@@ -562,7 +582,10 @@ class MultilingualDocument:
             return node
         if kind == "CodeBlock":
             self.code_blocks.append(content[1])
-            structure = TextStructure(story, code=True)
+            # A code block's own attributes survive syntax highlighting via its ID.
+            if not content[0][0]:
+                content[0][0] = f"{self._marker_prefix}CODE{len(self.code_blocks) - 1}"
+            structure = TextStructure(story, code=True, anchor=content[0][0])
             code = content[1].replace("\r\n", "\n").replace("\r", "\n")
             for index, line in enumerate(code.split("\n")):
                 if index:
@@ -574,9 +597,6 @@ class MultilingualDocument:
             ):
                 self.resolver.resolve(key, self._checked_text(part))
                 self.scripts.add(name)
-            # A code block's own attributes survive syntax highlighting via its ID.
-            if not content[0][0]:
-                content[0][0] = f"{self._marker_prefix}CODE{len(self.code_blocks) - 1}"
             self.code_languages[content[0][0]] = lang
             return node
         if kind == "Note":
@@ -673,13 +693,11 @@ class MultilingualDocument:
                         character_styles[name.get(W + "val")] = style.get(W + "styleId")
         # Pandoc prefixes bookmark names with '_' and hashes names that Word
         # cannot use directly. These aliases preserve language for user IDs too.
+        code_bookmarks = self._code_bookmarks()
         bookmark_languages = {
-            hashlib.sha1(identifier.encode("utf-8"), usedforsecurity=False).hexdigest()[
-                1:
-            ]: lang
-            for identifier, lang in self.code_languages.items()
+            alias: self.code_languages[identifier]
+            for alias, identifier in code_bookmarks.items()
         }
-        bookmark_languages.update(self.code_languages)
         for info in entries:
             if info.filename.startswith("word/") and info.filename.endswith(".xml"):
                 if info.file_size > self.limits.xml_bytes:
@@ -708,29 +726,20 @@ class MultilingualDocument:
                     if len(found) == 1:
                         paragraph_structures[candidate] = next(iter(found.values()))
                 for paragraph in root.iter(W + "p"):
-                    style = paragraph.find(W + "pPr/" + W + "pStyle")
-                    code = style is not None and style.get(W + "val") in {
-                        "SourceCode",
-                        "CodeBlock",
-                    }
-                    if code:
-                        code_text.append(
-                            "".join(paragraph.xpath(".//w:t/text()", namespaces=NS))
-                        )
+                    bookmark = _paragraph_bookmark(paragraph)
+                    code_anchor = code_bookmarks.get(bookmark or "")
+                    code = code_anchor is not None
+                    paragraph_events = _paragraph_events(paragraph)
                     paragraph_text = "".join(
-                        paragraph.xpath(".//w:t/text()", namespaces=NS)
+                        event for event in paragraph_events if event is not None
                     )
-                    code_lang = self.lang
-                    previous = paragraph.getprevious()
-                    if (
-                        code
-                        and previous is not None
-                        and previous.tag == W + "bookmarkStart"
-                    ):
-                        bookmark = previous.get(W + "name", "")
-                        code_lang = bookmark_languages.get(
-                            bookmark.removeprefix("_"), self.lang
-                        )
+                    if code:
+                        code_text.append(paragraph_text)
+                    code_lang = (
+                        bookmark_languages.get(bookmark or "", self.lang)
+                        if code
+                        else self.lang
+                    )
                     marked_paragraph = False
                     for run in list(paragraph.iter(W + "r")):
                         run_paragraph = _nearest_paragraph(run)
@@ -1101,20 +1110,21 @@ class MultilingualDocument:
                 if actual_events != expected.events:
                     failures.append(f"{name}: paragraph text structure mismatch")
         expected_code = [item for item in expected_structures if item.code]
-        actual_code = [
-            paragraph
-            for paragraph in paragraphs
-            if (
-                paragraph.find(W + "pPr/" + W + "pStyle") is not None
-                and paragraph.find(W + "pPr/" + W + "pStyle").get(W + "val")
-                in {"SourceCode", "CodeBlock"}
-            )
-        ]
+        code_bookmarks = self._code_bookmarks()
+        actual_code = []
+        for paragraph in paragraphs:
+            anchor = code_bookmarks.get(_paragraph_bookmark(paragraph) or "")
+            if anchor is not None:
+                actual_code.append((anchor, paragraph))
         if len(actual_code) != len(expected_code):
             failures.append(f"{name}: code block structure count mismatch")
         else:
-            for expected, paragraph in zip(expected_code, actual_code, strict=True):
-                if _paragraph_events(paragraph) != expected.events:
+            for expected, (anchor, paragraph) in zip(
+                expected_code, actual_code, strict=True
+            ):
+                if anchor != expected.anchor:
+                    failures.append(f"{name}: code block anchor order mismatch")
+                elif _paragraph_events(paragraph) != expected.events:
                     failures.append(f"{name}: code block line structure mismatch")
 
     def _run_properties_contain_text(self, run: Any) -> bool:
