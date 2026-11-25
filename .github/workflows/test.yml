@@ -204,17 +204,10 @@ jobs:
         if: runner.os == 'Linux'
         run: uv run --locked python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
       - id: wheel-validation
-        name: Build distribution and test installed wheel
+        name: Build and validate wheel and sdist distributions
         run: |
           uv build --out-dir artifacts/dist
-          uv venv artifacts/wheel-env --python 3.14
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            WHEEL_PYTHON="artifacts/wheel-env/Scripts/python.exe"
-          else
-            WHEEL_PYTHON="artifacts/wheel-env/bin/python"
-          fi
-          uv pip install --python "$WHEEL_PYTHON" artifacts/dist/*.whl
-          uv run --locked python scripts/validate_wheel.py --python "$WHEEL_PYTHON"
+          uv run --locked python scripts/validate_wheel.py --dist-dir artifacts/dist
       - id: check-test-evidence
         name: Verify required test evidence
         run: uv run --locked python scripts/check_test_evidence.py

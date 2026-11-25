@@ -60,29 +60,7 @@ jobs:
         name: Verify tag version and distributions
         env:
           RELEASE_REF: ${{ inputs.release_ref }}
-        run: |
-          uv run --locked python - <<'PY'
-          import os
-          import tarfile
-          from pathlib import Path
-
-          from markdown2docx import __version__
-
-          assert os.environ["RELEASE_REF"] == f"v{__version__}"
-          wheels = list(Path("dist").glob("*.whl"))
-          sdists = list(Path("dist").glob("*.tar.gz"))
-          assert len(wheels) == 1, wheels
-          assert len(sdists) == 1, sdists
-          assert wheels[0].name.startswith(f"markdown2docx-{__version__}-")
-          prefix = f"markdown2docx-{__version__}"
-          with tarfile.open(sdists[0], "r:gz") as archive:
-              names = set(archive.getnames())
-          assert f"{prefix}/pyproject.toml" in names
-          assert f"{prefix}/src/markdown2docx/__init__.py" in names
-          PY
-          uv venv artifacts/wheel-env --python 3.14
-          uv pip install --python artifacts/wheel-env/bin/python dist/*.whl
-          uv run --locked python scripts/validate_wheel.py --python artifacts/wheel-env/bin/python
+        run: uv run --locked python scripts/validate_wheel.py --dist-dir dist --expected-version "${RELEASE_REF#v}"
       - id: distribution-artifacts
         name: Upload required distribution artifacts
         if: always()
