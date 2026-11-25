@@ -485,6 +485,25 @@ class MarkdownToDocxConverter:
         except (OSError, zipfile.BadZipFile, KeyError, etree.XMLSyntaxError) as exc:
             raise TemplateError(str(path), f"Invalid DOCX template: {exc}") from exc
 
+    @staticmethod
+    def _normalize_path(path: Union[str, Path]) -> Path:
+        """Resolve a path before case-aware identity comparisons."""
+        return Path(os.path.normcase(os.path.realpath(path, strict=False)))
+
+    @staticmethod
+    def _same_file(first: Path, second: Path, input_file: str) -> bool:
+        """Conservatively identify existing paths that refer to the same file."""
+        try:
+            return os.path.samefile(first, second)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ConversionError(
+                input_file,
+                f"Unable to compare output path identity: {exc}",
+                exc,
+            ) from exc
+
     def _validate_output_path(self, output_path: Path, input_file: str) -> None:
         """Validate output path safety constraints before writing files."""
         if output_path.suffix.lower() != ".docx":
@@ -498,6 +517,26 @@ class MarkdownToDocxConverter:
                 input_file,
                 f"Refusing to write through symlink output path: {output_path}",
             )
+
+        input_path = Path(input_file)
+        normalized_output = self._normalize_path(output_path)
+        if normalized_output == self._normalize_path(input_path) or self._same_file(
+            output_path, input_path, input_file
+        ):
+            raise ConversionError(
+                input_file,
+                f"Input and output paths must be different: {output_path}",
+            )
+
+        if self.reference_doc is not None:
+            reference_path = Path(self.reference_doc)
+            if normalized_output == self._normalize_path(
+                reference_path
+            ) or self._same_file(output_path, reference_path, input_file):
+                raise ConversionError(
+                    input_file,
+                    f"Output path must be different from the reference template: {output_path}",
+                )
 
     def _build_pandoc_args(
         self, *, toc: bool, toc_depth: int, extra_args: Optional[Sequence[str]]
