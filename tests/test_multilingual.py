@@ -29,6 +29,24 @@ def parts(path):
         }
 
 
+def direction_runs(paragraph):
+    result = []
+    for run in paragraph.iter(W + "r"):
+        text = "".join(run.xpath("./w:t/text()", namespaces=NS))
+        if not text.strip():
+            continue
+        rtl = run.find(W + "rPr/" + W + "rtl")
+        cs = run.find(W + "rPr/" + W + "cs")
+        result.append(
+            (
+                text,
+                rtl.get(W + "val") if rtl is not None else None,
+                cs.get(W + "val") if cs is not None else None,
+            )
+        )
+    return result
+
+
 def generated_docx(tmp_path, paragraph, name="generated.docx"):
     path = tmp_path / name
     xml = (
@@ -198,6 +216,163 @@ def test_direction_auto_ignores_inline_code(tmp_path):
     for run in paragraphs[0].iter(W + "r"):
         if "123" in "".join(run.xpath("./w:t/text()", namespaces=NS)):
             assert run.find(W + "rPr/" + W + "rtl").get(W + "val") == "0"
+
+
+def test_explicit_local_rtl_overrides_latin_script_direction(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text("[ABC]{dir=rtl}\n", encoding="utf-8")
+    output = MarkdownToDocxConverter().convert(source, lang="en", offline=True)
+    paragraph = parts(output)["word/document.xml"].find(W + "body/" + W + "p")
+
+    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
+    assert paragraph.xpath(".//w:t/text()", namespaces=NS) == ["ABC"]
+    assert direction_runs(paragraph) == [("ABC", "1", "0")]
+
+
+def test_explicit_local_ltr_overrides_arabic_paragraph_direction(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text("العربية [ABC 123.]{dir=ltr} العربية\n", encoding="utf-8")
+    output = MarkdownToDocxConverter().convert(source, lang="ar", offline=True)
+    paragraph = parts(output)["word/document.xml"].find(W + "body/" + W + "p")
+
+    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
+    assert paragraph.xpath(".//w:t/text()", namespaces=NS) == [
+        "العربية",
+        " ",
+        "ABC",
+        " ",
+        "123.",
+        " ",
+        "العربية",
+    ]
+    assert direction_runs(paragraph) == [
+        ("العربية", "1", "1"),
+        ("ABC", "0", "0"),
+        ("123.", "0", "1"),
+        ("العربية", "1", "1"),
+    ]
+
+
+def test_explicit_local_rtl_applies_to_digits_and_punctuation(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text("العربية [123.,!]{dir=rtl} العربية\n", encoding="utf-8")
+    output = MarkdownToDocxConverter().convert(source, lang="ar", offline=True)
+    paragraph = parts(output)["word/document.xml"].find(W + "body/" + W + "p")
+
+    assert paragraph.find(W + "pPr/" + W + "bidi").get(W + "val") == "1"
+    assert paragraph.xpath(".//w:t/text()", namespaces=NS) == [
+        "العربية",
+        " ",
+        "123.,!",
+        " ",
+        "العربية",
+    ]
+    assert direction_runs(paragraph) == [
+        ("العربية", "1", "1"),
+        ("123.,!", "1", "1"),
+        ("العربية", "1", "1"),
+    ]
+
+
+def test_nested_span_and_div_directions_are_inherited_and_restored(tmp_path):
+    source = tmp_path / "direction.md"
+    source.write_text(
+        "[outer [inner]{dir=ltr} tail]{dir=rtl}\n\n"
+        "::: {dir=rtl}\n\n[ABC]{dir=ltr}\n\n"
+        "::: {dir=ltr}\n\n[DEF]{dir=rtl}\n\n:::\n\n:::\n",
+        encoding="utf-8",
+    )
+    output = MarkdownToDocxConverter().convert(source, lang="en", offline=True)
+    paragraphs = parts(output)["word/document.xml"].findall(W + "body/" + W + "p")
+
+    assert [
+        paragraph.find(W + "pPr/" + W + "bidi").get(W + "val")
+        for paragraph in paragraphs
+    ] == ["0", "1", "0"]
+    assert [
+        paragraph.xpath(".//w:t/text()", namespaces=NS) for paragraph in paragraphs
+    ] == [
+        ["outer", " ", "inner", " ", "tail"],
+        ["ABC"],
+        ["DEF"],
+    ]
+    assert [direction_runs(paragraph) for paragraph in paragraphs] == [
+        [("outer", "1", "0"), ("inner", "0", "0"), ("tail", "1", "0")],
+        [("ABC", "0", "0")],
+        [("DEF", "1", "0")],
+    ]
+
+
+@pytest.mark.parametrize(
+    "corruption", ["rtl", "bidi"], ids=["run-direction", "paragraph-direction"]
+)
+def test_verify_output_rejects_corrupted_explicit_direction(
+    tmp_path, monkeypatch, corruption
+):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    document = MultilingualDocument(
+        {
+            "meta": {},
+            "blocks": [
+                {
+                    "t": "Div",
+                    "c": [
+                        ["", [], [["dir", "rtl"]]],
+                        [
+                            {
+                                "t": "Para",
+                                "c": [
+                                    {
+                                        "t": "Span",
+                                        "c": [
+                                            ["", [], [["dir", "rtl"]]],
+                                            [{"t": "Str", "c": "ABC"}],
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    ],
+                }
+            ],
+        },
+        FontResolver(),
+        lang="en",
+    )
+    document.annotate()
+    marker = next(iter(document.runs))
+    path = generated_docx(
+        tmp_path,
+        f'<w:r><w:rPr><w:rStyle w:val="{marker}"/></w:rPr><w:t>ABC</w:t></w:r>',
+    )
+    original = path.read_bytes()
+    if corruption == "rtl":
+        properties = document._properties
+
+        def corrupt_run_direction(run, spec):
+            properties(run, spec)
+            run.find(W + "rPr/" + W + "rtl").set(W + "val", "0")
+
+        monkeypatch.setattr(document, "_properties", corrupt_run_direction)
+    else:
+        paragraph_direction = document._paragraph
+
+        def corrupt_paragraph_direction(paragraph, value):
+            paragraph_direction(paragraph, value)
+            paragraph.find(W + "pPr/" + W + "bidi").set(W + "val", "0")
+
+        monkeypatch.setattr(document, "_paragraph", corrupt_paragraph_direction)
+
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any(
+        "rtl mismatch" in message
+        if corruption == "rtl"
+        else "paragraph direction mismatch" in message
+        for message in error.value.validation_errors
+    )
+    assert path.read_bytes() == original
 
 
 def test_metadata_precedence_and_ui_independence(tmp_path):
