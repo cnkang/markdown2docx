@@ -2,6 +2,7 @@
 
 import ntpath
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +17,11 @@ from markdown2docx.output import staged_docx_output
 from markdown2docx.templates import DocxTemplateManager
 
 posix_only = pytest.mark.skipif(
-    os.name == "nt", reason="POSIX directory descriptor, rename, and symlink semantics"
+    os.name == "nt",
+    reason="posix_only: POSIX directory descriptor, rename, and symlink semantics",
+)
+windows_only = pytest.mark.skipif(
+    os.name != "nt", reason="Windows directory handles and namespace semantics"
 )
 
 
@@ -255,6 +260,119 @@ def test_writer_ignores_untrusted_tmpdir(monkeypatch, tmp_path):
     assert output.read_bytes() == b"document"
 
 
+@windows_only
+def test_windows_rejects_junction_output_parent(tmp_path):
+    """A junction must not redirect publication into its target directory."""
+    protected = tmp_path / "protected"
+    nested = protected / "nested"
+    nested.mkdir(parents=True)
+    canary = nested / "report.docx"
+    canary.write_bytes(b"protected")
+    junction = tmp_path / "junction"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(protected)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        assert junction.is_dir()
+        with pytest.raises(OSError, match="reparse point|unsafe output directory"):
+            with staged_docx_output(junction / "nested" / "report.docx") as stage:
+                stage.write_bytes(b"replacement")
+        assert canary.read_bytes() == b"protected"
+    finally:
+        junction.rmdir()
+
+
+@windows_only
+@pytest.mark.parametrize("operation", ["rename", "replace"])
+def test_windows_staged_output_pins_parent_directory(tmp_path, operation):
+    """An open staging context must prevent its parent from being moved/replaced."""
+    parent = tmp_path / "output"
+    parent.mkdir()
+    output = parent / "report.docx"
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+
+    with staged_docx_output(output) as stage:
+        stage.write_bytes(b"document")
+        with pytest.raises(OSError):
+            if operation == "rename":
+                parent.rename(tmp_path / "moved")
+            else:
+                os.replace(replacement, parent)
+
+    assert output.read_bytes() == b"document"
+
+
+@windows_only
+def test_windows_no_overwrite_preserves_existing_file(tmp_path):
+    """Exclusive Windows publication must leave an existing document untouched."""
+    output = tmp_path / "report.docx"
+    output.write_bytes(b"original")
+
+    with pytest.raises(FileExistsError):
+        with staged_docx_output(output, overwrite=False) as stage:
+            stage.write_bytes(b"replacement")
+
+    assert output.read_bytes() == b"original"
+
+
+@windows_only
+def test_windows_writer_failure_preserves_existing_file(render, tmp_path):
+    """A failed Windows writer must not replace the previous document."""
+    output = tmp_path / "report.docx"
+    output.write_bytes(b"original")
+
+    def fail():
+        raise RuntimeError("writer failed")
+
+    with pytest.raises((ConversionError, TemplateError), match="writer failed"):
+        render(output, fail)
+
+    assert output.read_bytes() == b"original"
+    assert not list(tmp_path.glob(".markdown2docx-*"))
+
+
+@windows_only
+def test_windows_validation_failure_preserves_existing_file(monkeypatch, tmp_path):
+    """Invalid staged output must never replace a valid Windows destination."""
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    source = tmp_path / "input.md"
+    source.write_text("# Document")
+    output = source.with_suffix(".docx")
+    output.write_bytes(b"original")
+
+    def invalid(*_args, outputfile, **_kwargs):
+        Path(outputfile).write_bytes(b"invalid")
+
+    monkeypatch.setattr("markdown2docx.converter.write_docx", invalid)
+    with pytest.raises(ValidationError):
+        MarkdownToDocxConverter().convert(source, validate_output=True)
+
+    assert output.read_bytes() == b"original"
+    assert not list(tmp_path.glob(".markdown2docx-*"))
+
+
+@windows_only
+def test_windows_rejects_real_casefolded_input_output_alias(collision_guards, tmp_path):
+    """Exercise the case-insensitive Windows namespace without normcase patching."""
+    source = tmp_path / "input.docx"
+    original = b"# Markdown input\n"
+    source.write_bytes(original)
+    output = tmp_path / "INPUT.DOCX"
+    assert source.samefile(output)
+
+    with pytest.raises(
+        ConversionError, match="Input and output paths must be different"
+    ):
+        MarkdownToDocxConverter().convert(source, output)
+
+    _assert_no_conversion_side_effects(collision_guards)
+    assert source.read_bytes() == original
+
+
 @pytest.fixture
 def reference_docx(tmp_path):
     """Create a valid reference document for output-identity checks."""
@@ -403,6 +521,7 @@ def test_convert_rejects_existing_hardlink_output_alias(
     assert output.read_bytes() == original
 
 
+@posix_only
 def test_convert_rejects_casefolded_input_output_alias(
     collision_guards, tmp_path, monkeypatch
 ):
