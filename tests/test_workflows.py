@@ -42,9 +42,8 @@ BUILD_STEP_IDS = (
     "require-release-tag",
     "checkout",
     "setup-uv",
-    "install-pandoc",
-    "prepare-fonts",
-    "build-distribution",
+    "download-test-evidence",
+    "copy-distribution",
     "verify-distributions",
     "distribution-artifacts",
 )
@@ -288,10 +287,8 @@ def test_release_build_has_only_packaging_steps(release_workflow):
 
     assert tuple(step.get("id") for step in steps) == BUILD_STEP_IDS
     assert (
-        step_by_id(release_workflow["jobs"]["build"], "build-distribution")[
-            "run"
-        ].strip()
-        == "uv build"
+        "artifacts/evidence/artifacts/dist/*"
+        in step_by_id(release_workflow["jobs"]["build"], "copy-distribution")["run"]
     )
 
 
@@ -300,8 +297,37 @@ def test_release_build_verifies_wheel_and_sdist(release_workflow):
 
     assert "scripts/validate_wheel.py --dist-dir dist" in verify["run"]
     assert '--expected-version "${RELEASE_REF#v}"' in verify["run"]
+    assert "--validate-only" in verify["run"]
     assert "uv venv" not in verify["run"]
     assert "uv pip install" not in verify["run"]
+
+
+def test_release_build_reuses_linux_evidence_without_rebuilding(release_workflow):
+    build = release_workflow["jobs"]["build"]
+    download = step_by_id(build, "download-test-evidence")
+    verify = step_by_id(build, "verify-distributions")
+
+    assert download["uses"].startswith("actions/download-artifact@")
+    assert download["with"]["name"] == "evidence-Linux"
+    assert download["with"]["path"] == "artifacts/evidence"
+    assert (
+        "cp artifacts/evidence/artifacts/dist/* dist/"
+        in step_by_id(build, "copy-distribution")["run"]
+    )
+    assert "--validate-only" in verify["run"]
+    build_commands = "\n".join(step.get("run", "") for step in build["steps"])
+    assert "uv build" not in build_commands
+    assert "uv pip install" not in build_commands
+    assert "install_pandoc.py" not in build_commands
+    assert "prepare_fonts.py" not in build_commands
+
+
+def test_publish_still_downloads_the_distribution_artifact(release_workflow):
+    download = step_by_id(release_workflow["jobs"]["publish"], "download-distribution")
+
+    assert download["uses"].startswith("actions/download-artifact@")
+    assert download["with"]["name"] == "distribution"
+    assert download["with"]["path"] == "dist/"
 
 
 def test_release_build_and_reusable_jobs_check_out_github_sha(
@@ -341,6 +367,22 @@ def test_reusable_workflow_runs_three_platform_tests_after_quality(test_workflow
     assert required_jobs(test) == {"quality"}
     assert set(platforms) == {"ubuntu-latest", "macos-latest", "windows-latest"}
     assert step_by_id(test, "matrix-test")["run"].strip() == MATRIX_TEST_COMMAND
+
+
+def test_wheel_validation_uses_locked_constraints_and_linux_only_rebuild(
+    test_workflow,
+):
+    validation = step_by_id(test_workflow["jobs"]["test"], "wheel-validation")
+    run = validation["run"]
+
+    assert (
+        "uv export --locked --no-dev --no-emit-project --no-hashes "
+        "--output-file artifacts/wheel-constraints.txt"
+    ) in run
+    assert "--constraints artifacts/wheel-constraints.txt" in run
+    assert 'if [ "$RUNNER_OS" = "Linux" ]; then' in run
+    assert "--skip-sdist-rebuild" in run
+    assert "uv pip install" not in run
 
 
 def test_reusable_workflow_enforces_windows_junit_skips(test_workflow):

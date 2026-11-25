@@ -5,9 +5,12 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
+import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 import unicodedata
 import zipfile
@@ -992,6 +995,128 @@ def test_distribution_directory_requires_exactly_one_of_each(validator, tmp_path
         validator.validate_distribution_directory(tmp_path, VERSION)
 
 
+def test_run_starts_a_new_posix_process_session(validator, tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            self.args = command
+            captured.update(kwargs)
+
+        def communicate(self, input=None, timeout=None):
+            return "ok", ""
+
+        def kill(self):
+            self.returncode = -9
+
+        def poll(self):
+            return self.returncode
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(validator.subprocess, "Popen", FakeProcess)
+
+    result = validator._run(
+        [sys.executable, "-c", "print('ok')"], cwd=tmp_path, timeout=5
+    )
+
+    assert result.stdout == "ok"
+    assert captured["start_new_session"] is True
+    assert captured["shell"] is False
+
+
+def test_windows_cleanup_uses_taskkill_tree_and_bounded_wait(validator, monkeypatch):
+    commands = []
+    waits = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            self.returncode = 0
+            return 0
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        assert kwargs["timeout"] == validator.PROCESS_TERMINATION_TIMEOUT
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(validator.subprocess, "run", fake_run)
+
+    validator._terminate_process_tree(FakeProcess(), windows=True)
+
+    assert commands == [["taskkill", "/PID", "4321", "/T", "/F"]]
+    assert waits == [validator.PROCESS_TERMINATION_TIMEOUT]
+
+
+def test_run_cleans_up_process_tree_on_cancellation(validator, tmp_path, monkeypatch):
+    cleaned = []
+
+    class CancelledProcess:
+        returncode = None
+
+        def __init__(self, command, **kwargs):
+            self.args = command
+
+        def communicate(self, input=None, timeout=None):
+            raise KeyboardInterrupt
+
+        def kill(self):
+            self.returncode = -9
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(validator.subprocess, "Popen", CancelledProcess)
+    monkeypatch.setattr(
+        validator,
+        "_terminate_process_tree",
+        lambda process, *, windows: cleaned.append(process),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        validator._run([sys.executable, "-c", "pass"], cwd=tmp_path, timeout=5)
+
+    assert len(cleaned) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group descendant check")
+def test_run_timeout_kills_real_descendant_processes(validator, tmp_path):
+    marker = tmp_path / "descendant-survived"
+    child_code = (
+        "import pathlib,time; "
+        f"time.sleep(2); pathlib.Path({str(marker)!r}).write_text('survived')"
+    )
+    parent_code = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable,'-c',{child_code!r}]); time.sleep(60)"
+    )
+
+    with pytest.raises(validator.DistributionError, match="timed out"):
+        validator._run([sys.executable, "-c", parent_code], cwd=tmp_path, timeout=0.5)
+
+    time.sleep(2.2)
+    assert not marker.exists()
+
+
 def orchestration_dependencies(validator, tmp_path, events, fail_event=None):
     wheel = tmp_path / "published.whl"
     sdist = tmp_path / "published.tar.gz"
@@ -1086,6 +1211,52 @@ def test_main_orchestrates_every_distribution_step_and_cleans_workspace(
     assert not Path(temporary_directories[0].name).exists()
 
 
+def test_main_can_skip_sdist_rebuild_on_non_linux_platforms(validator, tmp_path):
+    events = []
+    dependencies, temporary_directories = orchestration_dependencies(
+        validator, tmp_path, events
+    )
+
+    result = validator.main(
+        [
+            "--dist-dir",
+            str(tmp_path / "dist"),
+            "--expected-version",
+            VERSION,
+            "--uv",
+            str(tmp_path / "uv"),
+            "--skip-sdist-rebuild",
+        ],
+        dependencies=dependencies,
+    )
+
+    assert result == 0
+    assert events == ["validate-distribution", "install-smoke:True"]
+    assert all(not Path(directory.name).exists() for directory in temporary_directories)
+
+
+def test_main_validate_only_skips_install_and_rebuild(validator, tmp_path):
+    events = []
+    dependencies, temporary_directories = orchestration_dependencies(
+        validator, tmp_path, events
+    )
+
+    result = validator.main(
+        [
+            "--dist-dir",
+            str(tmp_path / "dist"),
+            "--expected-version",
+            VERSION,
+            "--validate-only",
+        ],
+        dependencies=dependencies,
+    )
+
+    assert result == 0
+    assert events == ["validate-distribution"]
+    assert temporary_directories == []
+
+
 @pytest.mark.parametrize(
     "fail_event",
     [
@@ -1140,9 +1311,7 @@ def test_project_version_rejects_non_table_project(validator, tmp_path):
 
 def test_sdist_rebuild_uses_only_the_wheel_target(validator, tmp_path):
     uv = tmp_path / "uv"
-    command = validator.sdist_rebuild_command(
-        uv, tmp_path / "source", tmp_path / "rebuilt"
-    )
+    command = validator.sdist_rebuild_command(uv, tmp_path / "rebuilt")
 
     assert command == [
         str(uv),
@@ -1150,6 +1319,37 @@ def test_sdist_rebuild_uses_only_the_wheel_target(validator, tmp_path):
         "--wheel",
         "--out-dir",
         str(tmp_path / "rebuilt"),
+    ]
+
+
+def test_pip_install_command_uses_locked_constraints(validator, tmp_path):
+    python = tmp_path / "venv" / "bin" / "python"
+    wheel = tmp_path / "package.whl"
+    constraints = tmp_path / "constraints.txt"
+
+    assert validator.pip_install_command(python, wheel, constraints) == [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(python),
+        "--constraint",
+        str(constraints),
+        str(wheel),
+    ]
+
+
+def test_pip_install_command_without_constraints(validator, tmp_path):
+    python = tmp_path / "python"
+    wheel = tmp_path / "package.whl"
+
+    assert validator.pip_install_command(python, wheel) == [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(python),
+        str(wheel),
     ]
 
 
@@ -1277,4 +1477,5 @@ def test_release_validator_checks_the_tag_version():
     )
 
     assert '--expected-version "${RELEASE_REF#v}"' in step["run"]
+    assert "--validate-only" in step["run"]
     assert step["env"]["RELEASE_REF"] == "${{ inputs.release_ref }}"
