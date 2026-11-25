@@ -418,7 +418,7 @@ def _match_code_structures(
     for candidate in candidates:
         by_anchor.setdefault(candidate[0], []).append(candidate)
     offsets: dict[str, int] = {}
-    matches = []
+    matches: list[tuple[TextStructure, Any | None, str | None]] = []
     for structure in expected:
         choices = by_anchor.get(structure.anchor or "", [])
         if structure.bookmark_id is not None:
@@ -560,7 +560,7 @@ class MultilingualDocument:
                 toc_title = existing
             self.ast["meta"]["toc-title"] = toc_title
         # Pandoc writes metadata and the TOC title before the body.
-        metadata_keys = ("title", "subtitle", "author")
+        metadata_keys: tuple[str, ...] = ("title", "subtitle", "author")
         if toc:
             metadata_keys += ("toc-title",)
         for key in metadata_keys:
@@ -940,9 +940,13 @@ class MultilingualDocument:
         observed: dict[str, str] = {}
         observed_order: dict[str, list[str]] = {}
         expected_order: dict[str, list[str]] = {}
-        for marker, spec in self.runs.items():
-            story = spec.structure.story if spec.structure is not None else "document"
-            expected_order.setdefault(story, []).append(marker)
+        for marker_name, marker_spec in self.runs.items():
+            story = (
+                marker_spec.structure.story
+                if marker_spec.structure is not None
+                else "document"
+            )
+            expected_order.setdefault(story, []).append(marker_name)
         before: list[str] = []
         after: list[str] = []
         code_text: dict[str, list[str]] = {}
@@ -999,12 +1003,21 @@ class MultilingualDocument:
                         if _nearest_paragraph(run) is not candidate:
                             continue
                         run_style = run.find(W + "rPr/" + W + "rStyle")
-                        marker = (
+                        run_marker = (
                             run_style.get(W + "val") if run_style is not None else None
                         )
-                        spec = self.runs.get(marker)
-                        if spec is not None and spec.structure is not None:
-                            found[id(spec.structure)] = spec.structure
+                        structure_spec = (
+                            self.runs.get(run_marker)
+                            if run_marker is not None
+                            else None
+                        )
+                        if (
+                            structure_spec is not None
+                            and structure_spec.structure is not None
+                        ):
+                            found[id(structure_spec.structure)] = (
+                                structure_spec.structure
+                            )
                     if len(found) == 1:
                         paragraph_structures[candidate] = next(iter(found.values()))
                 expected_section_numbers: dict[int, str] = {}
@@ -1038,15 +1051,15 @@ class MultilingualDocument:
                     for run in list(paragraph.iter(W + "r")):
                         run_paragraph = _nearest_paragraph(run)
                         run_style = run.find(W + "rPr/" + W + "rStyle")
-                        marker = (
+                        run_marker = (
                             run_style.get(W + "val") if run_style is not None else None
                         )
-                        if marker in self.runs:
+                        if run_marker is not None and run_marker in self.runs:
                             order = observed_order.setdefault(story, [])
-                            if not order or order[-1] != marker:
-                                order.append(marker)
-                            spec = self.runs[marker]
-                            run_spec = spec
+                            if not order or order[-1] != run_marker:
+                                order.append(run_marker)
+                            marker_spec = self.runs[run_marker]
+                            run_spec = marker_spec
                             value = "".join(run.xpath("./w:t/text()", namespaces=NS))
                             unsafe = self._validate_run_shape(run, value)
                             if unsafe is None and any(
@@ -1056,34 +1069,41 @@ class MultilingualDocument:
                             if unsafe is None:
                                 parts = fragments(
                                     value,
-                                    spec.lang,
+                                    marker_spec.lang,
                                     "",
-                                    code=spec.code,
-                                    cjk=spec.cjk,
+                                    code=marker_spec.code,
+                                    cjk=marker_spec.cjk,
                                 )
                                 if len(parts) != 1:
                                     unsafe = "marker run contains mixed text fragments"
                                 else:
-                                    expected_key = self._font_key_for_text(value, spec)
+                                    expected_key = self._font_key_for_text(
+                                        value, marker_spec
+                                    )
                                     if expected_key is None:
                                         unsafe = (
                                             "marker run font does not cover its text"
                                         )
                                     else:
-                                        run_spec = replace(spec, font=expected_key)
+                                        run_spec = replace(
+                                            marker_spec, font=expected_key
+                                        )
                             if unsafe:
                                 raise ValidationError(
                                     str(path),
                                     [f"Cannot safely process marker run: {unsafe}"],
                                 )
-                            observed[marker] = observed.get(marker, "") + value
-                            if spec.character_style:
-                                style_id = character_styles.get(spec.character_style)
+                            observed[run_marker] = observed.get(run_marker, "") + value
+                            if marker_spec.character_style:
+                                style_id = character_styles.get(
+                                    marker_spec.character_style
+                                )
                                 if not style_id:
                                     raise ValidationError(
                                         str(path),
                                         [
-                                            f"Character style missing: {spec.character_style}"
+                                            "Character style missing: "
+                                            f"{marker_spec.character_style}"
                                         ],
                                     )
                                 run_style.set(W + "val", style_id)
@@ -1095,7 +1115,7 @@ class MultilingualDocument:
                             else:
                                 run_style.getparent().remove(run_style)
                             self._properties(run, run_spec)
-                            self._paragraph(paragraph, spec.paragraph_direction)
+                            self._paragraph(paragraph, marker_spec.paragraph_direction)
                             marked_paragraph = True
                         elif run.find(W + "t") is not None:
                             value = "".join(run.xpath("./w:t/text()", namespaces=NS))
@@ -1185,12 +1205,12 @@ class MultilingualDocument:
                 for run in root.iter(W + "r"):
                     if not any((child.text or "") for child in run.findall(W + "t")):
                         continue
-                    spec = self._styled_runs.get(run)
-                    if spec is None:
+                    styled_spec = self._styled_runs.get(run)
+                    if styled_spec is None:
                         raise ValidationError(
                             str(path), ["Text run was not styled safely"]
                         )
-                    expected_runs.append(spec)
+                    expected_runs.append(styled_spec)
                 self._expected_parts[info.filename] = (
                     expected_runs,
                     [
@@ -1220,13 +1240,13 @@ class MultilingualDocument:
             if observed_order.get(story, []) != expected_order.get(story, []):
                 failures.append(f"{story} marker run order mismatch")
         # Code paragraphs use line breaks instead of newline characters in w:t.
-        expected_code: dict[str, list[str]] = {}
+        expected_code_text: dict[str, list[str]] = {}
         for structure in self._structures:
             if structure.code:
-                expected_code.setdefault(structure.story, []).append(
+                expected_code_text.setdefault(structure.story, []).append(
                     "".join(event for event in structure.events if event is not None)
                 )
-        if code_text != expected_code:
+        if code_text != expected_code_text:
             failures.append("code block text")
         if "".join(before) != "".join(after):
             failures.append("DOCX text changed during font assignment")
@@ -1404,7 +1424,7 @@ class MultilingualDocument:
                 }
             )
             actual_paragraphs = [actual_groups[index][0] for index in overlaps]
-            actual_events = [
+            actual_group_events = [
                 _paragraph_events(
                     paragraphs[paragraph_index],
                     generated_section_number=expected_section_numbers.get(
@@ -1419,7 +1439,7 @@ class MultilingualDocument:
                 failures.append(
                     f"{name}: paragraph group {group_index} paragraphs "
                     f"{actual_paragraphs} structure count mismatch: "
-                    f"expected {_events_repr(expected.events)}, actual {_events_repr(actual_events)}"
+                    f"expected {_events_repr(expected.events)}, actual {_events_repr(actual_group_events)}"
                 )
                 continue
             actual_group_index = overlaps[0]
@@ -1435,7 +1455,7 @@ class MultilingualDocument:
                 failures.append(
                     f"{name}: paragraph group {group_index} paragraph "
                     f"{paragraph_index} structure count mismatch: "
-                    f"expected {_events_repr(expected.events)}, actual {_events_repr(actual_events)}"
+                    f"expected {_events_repr(expected.events)}, actual {_events_repr(actual_group_events)}"
                 )
                 continue
             if paragraph_index is None:
