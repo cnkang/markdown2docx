@@ -509,6 +509,28 @@ def test_verify_output_rejects_text_run_stream_corruption(
     )
 
 
+def test_source_code_paragraph_style_is_not_a_code_block(tmp_path):
+    source = tmp_path / "input.md"
+    source.write_text(
+        '::: {custom-style="SourceCode"}\nordinary paragraph\n:::\n',
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    report = MarkdownToDocxConverter().convert_with_report(source, output)
+    assert report.checks["text_integrity"] == "passed"
+    root = parts(output)["word/document.xml"]
+    paragraph = root.find(W + "body/" + W + "p")
+    assert paragraph.find(W + "pPr/" + W + "pStyle").get(W + "val") == "SourceCode"
+    assert "".join(paragraph.xpath(".//w:t/text()", namespaces=NS)) == (
+        "ordinary paragraph"
+    )
+    assert {
+        run.find(W + "rPr/" + W + "rFonts").get(W + "ascii")
+        for run in paragraph.findall(W + "r")
+        if run.find(W + "t") is not None
+    } == {"Noto Sans"}
+
+
 @pytest.mark.parametrize(
     "corruption",
     [
@@ -516,6 +538,8 @@ def test_verify_output_rejects_text_run_stream_corruption(
         "delete-soft-break",
         "delete-line-break",
         "delete-code-break",
+        "move-code-break",
+        "delete-code-anchor",
         "merge-paragraphs",
         "split-paragraph",
         "swap-paragraphs",
@@ -530,7 +554,11 @@ def test_verify_output_rejects_structural_text_corruption(
     source = tmp_path / "input.md"
     if corruption == "cross-part-move":
         source.write_text("Body[^note]\n\n[^note]: Footnote\n", encoding="utf-8")
-    elif corruption == "delete-code-break":
+    elif corruption in {
+        "delete-code-break",
+        "move-code-break",
+        "delete-code-anchor",
+    }:
         source.write_text("```text\none\ntwo\n```\n", encoding="utf-8")
     else:
         source.write_text("alpha beta\\\ngamma\nsoft\n\nsecond\n", encoding="utf-8")
@@ -551,6 +579,15 @@ def test_verify_output_rejects_structural_text_corruption(
         elif corruption == "delete-code-break":
             line_break = first.find(".//" + W + "br")
             line_break.getparent().remove(line_break)
+        elif corruption == "move-code-break":
+            line_break = first.find(".//" + W + "br")
+            line_break.getparent().remove(line_break)
+            last_text_run = first.xpath("./w:r[w:t][last()]", namespaces=NS)[0]
+            last_text_run.append(line_break)
+        elif corruption == "delete-code-anchor":
+            anchor = first.getprevious()
+            assert anchor is not None and anchor.tag == W + "bookmarkStart"
+            body.remove(anchor)
         elif corruption == "merge-paragraphs":
             second = paragraphs[1]
             for child in list(second):
@@ -843,6 +880,49 @@ def test_legal_drawing_textbox_run_is_accepted(tmp_path):
     assert root.xpath(
         "//w:drawing/w:txbxContent/w:p/w:r/w:t/text()", namespaces=NS
     ) == ["Textbox English"]
+
+
+@pytest.mark.parametrize("corrupt_outer", [False, True], ids=["intact", "corrupt"])
+def test_marked_paragraph_scopes_textbox_events(tmp_path, monkeypatch, corrupt_outer):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": [{"t": "Para", "c": [{"t": "Str", "c": "Outer"}]}]},
+        FontResolver(),
+        lang="en",
+    )
+    document.annotate()
+    marker = next(iter(document.runs))
+    path = generated_docx(
+        tmp_path,
+        f'<w:r><w:rPr><w:rStyle w:val="{marker}"/></w:rPr><w:t>Outer</w:t></w:r>'
+        "<w:r><w:drawing><w:txbxContent><w:p><w:r>"
+        "<w:t>Textbox English</w:t></w:r></w:p></w:txbxContent>"
+        "</w:drawing></w:r>",
+    )
+    original = path.read_bytes()
+    if corrupt_outer:
+        verify = document._verify_output
+
+        def remove_outer_then_verify(candidate):
+            def remove_outer(root):
+                paragraph = root.find(W + "body/" + W + "p")
+                paragraph.remove(paragraph.find(W + "r"))
+
+            rewrite_docx(candidate, {"word/document.xml": remove_outer})
+            verify(candidate)
+
+        monkeypatch.setattr(document, "_verify_output", remove_outer_then_verify)
+        with pytest.raises(ValidationError):
+            document.apply(path)
+        assert path.read_bytes() == original
+    else:
+        assert document.apply(path)["text_integrity"] == "passed"
+        root = parts(path)["word/document.xml"]
+        assert root.xpath("//w:body/w:p/w:r/w:t/text()", namespaces=NS) == ["Outer"]
+        assert root.xpath(
+            "//w:drawing/w:txbxContent/w:p/w:r/w:t/text()", namespaces=NS
+        ) == ["Textbox English"]
 
 
 @pytest.mark.parametrize(
