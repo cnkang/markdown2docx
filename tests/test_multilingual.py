@@ -604,6 +604,25 @@ def test_verify_output_rejects_text_nested_in_run_properties(tmp_path, monkeypat
     assert any("shape" in message.lower() for message in error.value.validation_errors)
 
 
+def test_legal_drawing_textbox_run_is_accepted(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(
+        tmp_path,
+        "<w:r><w:drawing><w:txbxContent><w:p><w:r>"
+        "<w:t>Textbox English</w:t></w:r></w:p></w:txbxContent>"
+        "</w:drawing></w:r>",
+    )
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    assert document.apply(path)["text_integrity"] == "passed"
+    root = parts(path)["word/document.xml"]
+    assert root.xpath(
+        "//w:drawing/w:txbxContent/w:p/w:r/w:t/text()", namespaces=NS
+    ) == ["Textbox English"]
+
+
 @pytest.mark.parametrize(
     ("paragraph", "text"),
     [
