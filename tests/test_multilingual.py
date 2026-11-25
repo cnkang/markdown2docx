@@ -1,5 +1,6 @@
 """Round-trip acceptance for CJK + UN languages in the same document."""
 
+import copy
 import json
 import os
 import subprocess
@@ -37,6 +38,23 @@ def generated_docx(tmp_path, paragraph, name="generated.docx"):
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("word/document.xml", xml)
     return path
+
+
+def rewrite_docx(path, mutations):
+    with zipfile.ZipFile(path) as archive:
+        entries = [(info, archive.read(info.filename)) for info in archive.infolist()]
+    updated = []
+    for info, data in entries:
+        if info.filename in mutations:
+            root = etree.fromstring(data)
+            mutations[info.filename](root)
+            data = etree.tostring(
+                root, xml_declaration=True, encoding="UTF-8", standalone=True
+            )
+        updated.append((info, data))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info, data in updated:
+            archive.writestr(info, data)
 
 
 def test_comprehensive_single_file(tmp_path):
@@ -489,6 +507,144 @@ def test_verify_output_rejects_text_run_stream_corruption(
         or "font coverage mismatch" in message
         for message in error.value.validation_errors
     )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "delete-space",
+        "delete-soft-break",
+        "delete-line-break",
+        "delete-code-break",
+        "merge-paragraphs",
+        "split-paragraph",
+        "swap-paragraphs",
+        "cross-part-move",
+    ],
+)
+def test_verify_output_rejects_structural_text_corruption(
+    tmp_path, monkeypatch, corruption
+):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    source = tmp_path / "input.md"
+    if corruption == "cross-part-move":
+        source.write_text("Body[^note]\n\n[^note]: Footnote\n", encoding="utf-8")
+    elif corruption == "delete-code-break":
+        source.write_text("```text\none\ntwo\n```\n", encoding="utf-8")
+    else:
+        source.write_text("alpha beta\\\ngamma\nsoft\n\nsecond\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    output.write_bytes(b"original")
+    verify = MultilingualDocument._verify_output
+
+    def corrupt_document(root):
+        body = root.find(W + "body")
+        paragraphs = body.findall(W + "p")
+        first = paragraphs[0]
+        if corruption in {"delete-space", "delete-soft-break"}:
+            spaces = first.xpath("./w:r/w:t[text()=' ']", namespaces=NS)
+            spaces[0 if corruption == "delete-space" else 1].text = ""
+        elif corruption == "delete-line-break":
+            line_break = first.find(".//" + W + "br")
+            line_break.getparent().remove(line_break)
+        elif corruption == "delete-code-break":
+            line_break = first.find(".//" + W + "br")
+            line_break.getparent().remove(line_break)
+        elif corruption == "merge-paragraphs":
+            second = paragraphs[1]
+            for child in list(second):
+                if child.tag != W + "pPr":
+                    first.append(child)
+            body.remove(second)
+        elif corruption == "split-paragraph":
+            split_at = next(
+                index
+                for index, child in enumerate(first)
+                if child.tag == W + "r"
+                and "gamma" in "".join(child.xpath("./w:t/text()", namespaces=NS))
+            )
+            second = etree.Element(W + "p")
+            props = first.find(W + "pPr")
+            if props is not None:
+                second.append(copy.deepcopy(props))
+            for child in list(first)[split_at:]:
+                second.append(child)
+            body.insert(body.index(first) + 1, second)
+        elif corruption == "swap-paragraphs":
+            second = paragraphs[1]
+            body.remove(second)
+            body.insert(body.index(first), second)
+
+    def corrupt_footnotes(root):
+        stored = root.xpath("//w:r[w:t[contains(., 'Footnote')]]", namespaces=NS)[0]
+        stored.getparent().remove(stored)
+
+    def move_note_to_body(root):
+        body = root.find(W + "body")
+        body.findall(W + "p")[0].append(copy.deepcopy(note))
+
+    note = None
+
+    def corrupt_then_verify(self, candidate):
+        nonlocal note
+        mutations = {"word/document.xml": corrupt_document}
+        if corruption == "cross-part-move":
+            with zipfile.ZipFile(candidate) as archive:
+                footnote_root = etree.fromstring(archive.read("word/footnotes.xml"))
+            note = footnote_root.xpath(
+                "//w:r[w:t[contains(., 'Footnote')]]", namespaces=NS
+            )[0]
+            mutations["word/footnotes.xml"] = corrupt_footnotes
+            mutations["word/document.xml"] = move_note_to_body
+        rewrite_docx(candidate, mutations)
+        verify(self, candidate)
+
+    monkeypatch.setattr(MultilingualDocument, "_verify_output", corrupt_then_verify)
+    with pytest.raises(ValidationError):
+        MarkdownToDocxConverter().convert(source, output)
+    assert output.read_bytes() == b"original"
+
+
+def test_conversion_rejects_swapped_marker_runs(tmp_path, monkeypatch):
+    source = tmp_path / "input.md"
+    source.write_text("[骨]{lang=zh-Hans} [骨]{lang=zh-Hant}\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    output.write_bytes(b"original")
+
+    from markdown2docx import converter as converter_module
+
+    write_docx = converter_module.write_docx
+
+    def swap_marker_runs(*args, **kwargs):
+        write_docx(*args, **kwargs)
+
+        def swap(root):
+            runs = root.xpath(
+                "//w:r[w:rPr/w:rStyle[starts-with(@w:val, 'MD2D')]]",
+                namespaces=NS,
+            )
+            assert len(runs) == 2
+            assert [
+                "".join(run.xpath("./w:t/text()", namespaces=NS)) for run in runs
+            ] == ["骨", "骨"]
+            markers = {
+                run.find(W + "rPr/" + W + "rStyle").get(W + "val") for run in runs
+            }
+            assert len(markers) == 2
+            parent = runs[0].getparent()
+            first, second = sorted((parent.index(runs[0]), parent.index(runs[1])))
+            parent.remove(runs[0])
+            parent.remove(runs[1])
+            parent.insert(first, runs[1])
+            parent.insert(second, runs[0])
+
+        rewrite_docx(Path(kwargs["outputfile"]), {"word/document.xml": swap})
+
+    monkeypatch.setattr(converter_module, "write_docx", swap_marker_runs)
+    with pytest.raises(ValidationError):
+        MarkdownToDocxConverter().convert(source, output)
+    assert output.read_bytes() == b"original"
 
 
 def test_verify_output_independently_checks_actual_run_font(tmp_path, monkeypatch):
