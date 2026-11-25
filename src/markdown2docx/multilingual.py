@@ -208,7 +208,8 @@ class RunContext:
     script: str
     code: bool = False
     character_style: str | None = None
-    context: str = ""
+    role: str = "body"
+    cjk: str = "cjk-sc"
 
 
 class MultilingualDocument:
@@ -330,12 +331,13 @@ class MultilingualDocument:
         local_dir: str | None = None,
     ) -> list[dict[str, Any]]:
         result = []
-        for key, part, rtl, name in self._fragments(text, lang, context, code=code):
+        cjk, ambiguous = self._context_key(lang, context)
+        for key, part, rtl, name in fragments(text, lang, context, code=code, cjk=cjk):
             if key == "sans" and self._role == "heading":
                 key = "heading"
             self.resolver.resolve(key, self._checked_text(part))
             self.scripts.add(name)
-            if name == "Han" and self._context_key(lang, context)[1]:
+            if name == "Han" and ambiguous:
                 self.warn(
                     "CJK_LANGUAGE_AMBIGUOUS",
                     "Unmarked shared Han characters use Simplified Chinese glyphs; add lang spans for regional forms",
@@ -350,7 +352,8 @@ class MultilingualDocument:
                 name,
                 code,
                 self._character_style,
-                context=context,
+                role=self._role,
+                cjk=cjk,
             )
             # VerbatimChar overrides custom-style in Pandoc. Carry inline code as
             # text in our own style, then apply its size/font explicitly.
@@ -569,6 +572,7 @@ class MultilingualDocument:
                         )
                         if marker in self.runs:
                             spec = self.runs[marker]
+                            run_spec = spec
                             value = "".join(run.xpath("./w:t/text()", namespaces=NS))
                             unsafe = self._validate_run_shape(run, value)
                             if unsafe is None and any(
@@ -576,23 +580,23 @@ class MultilingualDocument:
                             ):
                                 unsafe = "marker run contains non-text children"
                             if unsafe is None:
-                                parts = self._fragments(
+                                parts = fragments(
                                     value,
                                     spec.lang,
-                                    paragraph_text,
+                                    "",
                                     code=spec.code,
+                                    cjk=spec.cjk,
                                 )
                                 if len(parts) != 1:
                                     unsafe = "marker run contains mixed text fragments"
                                 else:
                                     expected_key = self._font_key_for_text(value, spec)
-                                    if expected_key is None or (
-                                        self.resolver.resolve(expected_key).family
-                                        != self.resolver.resolve(spec.font).family
-                                    ):
+                                    if expected_key is None:
                                         unsafe = (
                                             "marker run font does not cover its text"
                                         )
+                                    else:
+                                        run_spec = replace(spec, font=expected_key)
                             if unsafe:
                                 raise ValidationError(
                                     str(path),
@@ -616,7 +620,7 @@ class MultilingualDocument:
                                 run_style.set(W + "val", "Hyperlink")
                             else:
                                 run_style.getparent().remove(run_style)
-                            self._properties(run, spec)
+                            self._properties(run, run_spec)
                             self._paragraph(paragraph, spec.paragraph_direction)
                             marked_paragraph = True
                         elif run.find(W + "t") is not None:
@@ -700,7 +704,7 @@ class MultilingualDocument:
                 after.extend(root.xpath("//w:t/text()", namespaces=NS))
                 expected_runs = []
                 for run in root.iter(W + "r"):
-                    if run.find(W + "t") is None:
+                    if not any((child.text or "") for child in run.findall(W + "t")):
                         continue
                     spec = self._styled_runs.get(run)
                     if spec is None:
@@ -762,7 +766,11 @@ class MultilingualDocument:
             ) in self._expected_parts.items():
                 root = etree.fromstring(archive.read(name), parser)
                 all_runs = list(root.iter(W + "r"))
-                actual_runs = [run for run in all_runs if run.find(W + "t") is not None]
+                actual_runs = [
+                    run
+                    for run in all_runs
+                    if any((child.text or "") for child in run.findall(W + "t"))
+                ]
                 for run_index, run in enumerate(all_runs):
                     if self._run_properties_contain_text(run):
                         failures.append(
@@ -774,6 +782,14 @@ class MultilingualDocument:
                     failures.append(f"{name}: text run stream count mismatch")
                 for index, run in enumerate(actual_runs):
                     actual_text = "".join(run.xpath("./w:t/text()", namespaces=NS))
+                    for text_node in run.findall(W + "t"):
+                        value = text_node.text or ""
+                        if (
+                            value[:1].isspace() or value[-1:].isspace()
+                        ) and text_node.get(XML_SPACE) != "preserve":
+                            failures.append(
+                                f"{name}: xml:space mismatch at stream index {index}"
+                            )
                     unsafe = self._validate_run_shape(run, actual_text)
                     if unsafe:
                         if not self._run_properties_contain_text(run):
@@ -876,19 +892,11 @@ class MultilingualDocument:
         return None
 
     def _font_key_for_text(self, text: str, spec: RunContext) -> str | None:
-        if not any(
-            unicodedata.bidirectional(char) in {"L", "R", "AL"} for char in text
-        ):
-            return spec.font
-        cjk, _ = cjk_key(spec.lang, spec.context)
-        parts = fragments(
-            text,
-            spec.lang,
-            spec.context,
-            code=spec.code,
-            cjk=cjk,
-        )
-        return parts[0][0] if len(parts) == 1 else None
+        parts = fragments(text, spec.lang, "", code=spec.code, cjk=spec.cjk)
+        if len(parts) != 1:
+            return None
+        key = parts[0][0]
+        return "heading" if key == "sans" and spec.role == "heading" else key
 
     def _split_run(
         self,
@@ -900,7 +908,8 @@ class MultilingualDocument:
         lang: str | None,
         context: str,
     ) -> None:
-        parts = self._fragments(text, lang, context, code=code)
+        cjk = self._context_key(lang, context)[0]
+        parts = fragments(text, lang, context, code=code, cjk=cjk)
         unsafe = self._validate_run_shape(run, text)
         if unsafe is None and (
             "".join(part for _, part, _, _ in parts) != text
@@ -926,7 +935,8 @@ class MultilingualDocument:
                     "ltr" if code else direction(text),
                     name,
                     code,
-                    context=context,
+                    role=self._role,
+                    cjk=cjk,
                 ),
             )
             return
@@ -952,7 +962,6 @@ class MultilingualDocument:
                 continue
             source = child.text or ""
             if not source:
-                replacements.append(make_run(copy.deepcopy(child)))
                 continue
             offset = 0
             while offset < len(source):
@@ -972,7 +981,8 @@ class MultilingualDocument:
                         "ltr" if code else direction(text),
                         name,
                         code,
-                        context=context,
+                        role=self._role,
+                        cjk=cjk,
                     ),
                 )
                 replacements.append(clone)
