@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         with:
           version: "0.12.23"
@@ -46,6 +46,78 @@ jobs:
           uv run --locked pytest tests/test_skill.py
       - run: make quality
       - run: uv run --locked pre-commit run --all-files
+  skill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          version: "0.12.23"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+      - name: Install checksum-pinned Pandoc
+        run: uv run --locked python scripts/install_pandoc.py --github-env
+      - name: Prepare verified fonts
+        run: uv run --locked python scripts/prepare_fonts.py
+      - name: Smoke test the real agent skill launcher
+        run: |
+          mkdir -p artifacts/skill-smoke
+          cat > artifacts/skill-smoke/input.md <<'MD'
+          # Skill smoke
+
+          This is a minimal Markdown to DOCX conversion.
+          MD
+          python skills/markdown-to-docx/scripts/run.py --version | tee artifacts/skill-smoke/version.txt
+          python skills/markdown-to-docx/scripts/run.py --doctor --json | tee artifacts/skill-smoke/doctor.json
+          python skills/markdown-to-docx/scripts/run.py artifacts/skill-smoke/input.md -o artifacts/skill-smoke/output.docx --offline --json | tee artifacts/skill-smoke/report.json
+          python - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          root = Path("artifacts/skill-smoke")
+          version = (root / "version.txt").read_text(encoding="utf-8").strip()
+          assert version.startswith("markdown2docx "), version
+          doctor = json.loads((root / "doctor.json").read_text(encoding="utf-8"))
+          assert str(doctor["pandoc"]).startswith("3.12"), doctor
+          report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+          assert report["status"] == "success", report
+          assert all(
+              report["checks"][name] == "passed"
+              for name in (
+                  "structure",
+                  "text_integrity",
+                  "font_coverage",
+                  "language_direction",
+              )
+          ), report["checks"]
+          output = root / "output.docx"
+          assert output.is_file() and output.stat().st_size > 0
+          with zipfile.ZipFile(output) as archive:
+              assert archive.testzip() is None
+              assert {"[Content_Types].xml", "word/document.xml"} <= set(archive.namelist())
+              document = ElementTree.fromstring(archive.read("word/document.xml"))
+          namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+          text = "\n".join(
+              "".join(node.text or "" for node in paragraph.findall(".//w:t", namespace))
+              for paragraph in document.findall(".//w:p", namespace)
+          )
+          assert "Skill smoke" in text, text
+          assert "minimal Markdown to DOCX conversion" in text, text
+          print("Real agent skill launcher smoke passed")
+          PY
+      - name: Upload agent skill smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: skill-smoke
+          path: artifacts/skill-smoke/
+          if-no-files-found: warn
   test:
     needs: quality
     timeout-minutes: 25
@@ -61,6 +133,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
