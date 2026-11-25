@@ -208,6 +208,7 @@ class RunContext:
     script: str
     code: bool = False
     character_style: str | None = None
+    context: str = ""
 
 
 class MultilingualDocument:
@@ -349,6 +350,7 @@ class MultilingualDocument:
                 name,
                 code,
                 self._character_style,
+                context=context,
             )
             # VerbatimChar overrides custom-style in Pandoc. Carry inline code as
             # text in our own style, then apply its size/font explicitly.
@@ -759,9 +761,18 @@ class MultilingualDocument:
                 expected_paragraphs,
             ) in self._expected_parts.items():
                 root = etree.fromstring(archive.read(name), parser)
-                actual_runs = [
-                    run for run in root.iter(W + "r") if run.find(W + "t") is not None
-                ]
+                all_runs = list(root.iter(W + "r"))
+                actual_runs = [run for run in all_runs if run.find(W + "t") is not None]
+                for run_index, run in enumerate(all_runs):
+                    if next(run.iter(W + "t"), None) is None:
+                        continue
+                    actual_text = "".join(run.xpath("./w:t/text()", namespaces=NS))
+                    unsafe = self._validate_run_shape(run, actual_text)
+                    if unsafe:
+                        failures.append(
+                            f"{name}: invalid text run shape at run index "
+                            f"{run_index}: {unsafe}"
+                        )
                 paragraphs = list(root.iter(W + "p"))
                 if len(actual_runs) != len(expected_runs):
                     failures.append(f"{name}: text run stream count mismatch")
@@ -830,6 +841,12 @@ class MultilingualDocument:
             return "run has no text nodes"
         if len(run.findall(W + "rPr")) > 1:
             return "run has multiple property nodes"
+        if any(
+            next(props.iter(tag), None) is not None
+            for props in run.findall(W + "rPr")
+            for tag in (W + "r", W + "t")
+        ):
+            return "run properties contain nested text"
         if any(len(child) for child in text_children):
             return "text node contains nested markup"
         if any(
@@ -856,12 +873,13 @@ class MultilingualDocument:
             unicodedata.bidirectional(char) in {"L", "R", "AL"} for char in text
         ):
             return spec.font
+        cjk, _ = cjk_key(spec.lang, spec.context)
         parts = fragments(
             text,
             spec.lang,
-            text,
+            spec.context,
             code=spec.code,
-            cjk=spec.font if spec.font.startswith("cjk") else None,
+            cjk=cjk,
         )
         return parts[0][0] if len(parts) == 1 else None
 
@@ -894,7 +912,14 @@ class MultilingualDocument:
             self._properties(
                 run,
                 RunContext(
-                    text, key, lang, rtl, "ltr" if code else direction(text), name, code
+                    text,
+                    key,
+                    lang,
+                    rtl,
+                    "ltr" if code else direction(text),
+                    name,
+                    code,
+                    context=context,
                 ),
             )
             return
@@ -940,6 +965,7 @@ class MultilingualDocument:
                         "ltr" if code else direction(text),
                         name,
                         code,
+                        context=context,
                     ),
                 )
                 replacements.append(clone)
