@@ -28,6 +28,17 @@ def parts(path):
         }
 
 
+def generated_docx(tmp_path, paragraph, name="generated.docx"):
+    path = tmp_path / name
+    xml = (
+        f'<w:document xmlns:w="{NS["w"]}"><w:body><w:p>'
+        f"{paragraph}</w:p></w:body></w:document>"
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", xml)
+    return path
+
+
 def test_comprehensive_single_file(tmp_path):
     output = tmp_path / "mixed.docx"
     report = MarkdownToDocxConverter().convert_with_report(
@@ -286,6 +297,167 @@ def test_writer_generated_emoji_runs_are_unverified(tmp_path, line_break):
     assert any(item["code"] == "EMOJI_UNVERIFIED" for item in document.warnings)
     assert "🇺🇳 👍🏽 1️⃣" == "".join(
         parts(path)["word/document.xml"].xpath("//w:t/text()", namespaces=NS)
+    )
+
+
+def test_mixed_run_with_break_splits_fonts_and_preserves_order(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(
+        tmp_path,
+        "<w:r><w:rPr><w:b/></w:rPr><w:t>English中文العربية</w:t><w:br/></w:r>",
+    )
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    assert document.apply(path)["text_integrity"] == "passed"
+
+    paragraph = parts(path)["word/document.xml"].find(".//" + W + "p")
+    events = []
+    text_runs = []
+    for run in paragraph.findall(W + "r"):
+        for child in run:
+            if child.tag == W + "t":
+                events.append(child.text or "")
+                text_runs.append(run)
+            elif child.tag == W + "br":
+                events.append("br")
+    assert events == ["English", "中文", "العربية", "br"]
+    assert [
+        run.find(W + "rPr/" + W + "rFonts").get(W + "ascii") for run in text_runs
+    ] == ["Noto Sans", "Noto Sans CJK SC", "Noto Sans Arabic"]
+    assert all(run.find(W + "rPr/" + W + "b") is not None for run in text_runs)
+    assert text_runs[-1].find(W + "rPr/" + W + "rtl").get(W + "val") == "1"
+
+
+def test_multiple_text_nodes_preserve_mixed_fonts_and_child_order(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(
+        tmp_path,
+        "<w:r>"
+        "<w:t>English中</w:t>"
+        '<w:bookmarkStart w:id="7" w:name="mixed"/>'
+        "<w:t>文الع</w:t>"
+        "<w:tab/>"
+        "<w:t>ربية</w:t>"
+        '<w:bookmarkEnd w:id="7"/>'
+        "</w:r>",
+    )
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    document.apply(path)
+
+    paragraph = parts(path)["word/document.xml"].find(".//" + W + "p")
+    events = []
+    text_runs = []
+    for run in paragraph.findall(W + "r"):
+        for child in run:
+            if child.tag == W + "t":
+                events.append(child.text or "")
+                text_runs.append(run)
+            elif child.tag == W + "bookmarkStart":
+                events.append(("bookmarkStart", child.get(W + "name")))
+            elif child.tag == W + "bookmarkEnd":
+                events.append(("bookmarkEnd", child.get(W + "id")))
+            elif child.tag == W + "tab":
+                events.append("tab")
+    assert events == [
+        "English",
+        "中",
+        ("bookmarkStart", "mixed"),
+        "文",
+        "الع",
+        "tab",
+        "ربية",
+        ("bookmarkEnd", "7"),
+    ]
+    assert [
+        run.find(W + "rPr/" + W + "rFonts").get(W + "ascii") for run in text_runs
+    ] == [
+        "Noto Sans",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK SC",
+        "Noto Sans Arabic",
+        "Noto Sans Arabic",
+    ]
+
+
+def test_split_run_preserves_edge_whitespace_in_serialized_xml(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t> English中文العربية </w:t></w:r>")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    document.apply(path)
+
+    with zipfile.ZipFile(path) as archive:
+        xml = archive.read("word/document.xml")
+    root = etree.fromstring(xml)
+    text_nodes = root.xpath("//w:t", namespaces=NS)
+    assert [node.text for node in text_nodes] == [
+        " English",
+        "中文",
+        "العربية",
+        " ",
+    ]
+    xml_space = "{http://www.w3.org/XML/1998/namespace}space"
+    for node in text_nodes:
+        value = node.text or ""
+        if value.startswith(" ") or value.endswith(" "):
+            assert node.get(xml_space) == "preserve"
+    assert xml.count(b'xml:space="preserve"') == 2
+
+
+def test_split_run_rejects_nested_text_it_cannot_safely_split(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(
+        tmp_path,
+        "<w:r><w:t>English中文</w:t>"
+        "<w:smartTag><w:r><w:t>nested</w:t></w:r></w:smartTag></w:r>",
+    )
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert error.value.output_file == str(path)
+    assert any(
+        "cannot safely split run" in message.lower()
+        for message in error.value.validation_errors
+    )
+
+
+def test_verify_output_rejects_swapped_run_text(tmp_path, monkeypatch):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(tmp_path, "<w:r><w:t>English中文</w:t></w:r>")
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="en"
+    )
+    verify = document._verify_output
+
+    def swap_text_then_verify(candidate):
+        with zipfile.ZipFile(candidate) as archive:
+            xml = archive.read("word/document.xml")
+        root = etree.fromstring(xml)
+        text_nodes = root.xpath("//w:r[w:t]/w:t", namespaces=NS)
+        text_nodes[0].text, text_nodes[1].text = (
+            text_nodes[1].text,
+            text_nodes[0].text,
+        )
+        with zipfile.ZipFile(candidate, "w") as archive:
+            archive.writestr("word/document.xml", etree.tostring(root))
+        verify(candidate)
+
+    monkeypatch.setattr(document, "_verify_output", swap_text_then_verify)
+    with pytest.raises(ValidationError) as error:
+        document.apply(path)
+    assert any(
+        "run text mismatch" in message for message in error.value.validation_errors
     )
 
 
