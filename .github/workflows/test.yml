@@ -3,6 +3,7 @@ name: Test
 on:
   push:
   pull_request:
+  workflow_call:
 
 concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}

@@ -1,6 +1,7 @@
 # markdown2docx Remediation Design
 
-Date: 2026-11-25  
+Date: 2026-11-25
+
 Source revision: `bac6731231a38f9873fd1dfeba02ce1c8a448a76`
 
 ## Goal

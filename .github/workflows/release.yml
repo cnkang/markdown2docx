@@ -17,7 +17,10 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
   build:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -41,18 +44,35 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         with:
           version: "0.12.23"
-      - run: uv sync --locked --group dev --group test
-      - run: make quality
-      - run: uv run --locked python scripts/install_pandoc.py --github-env
-      - run: uv run --locked python scripts/prepare_fonts.py
-      - run: uv run --locked pytest
-      - run: uv run --locked python scripts/validate_multilingual.py --offline --output-dir artifacts/multilingual
-      - run: uv build
-      - name: Verify tag version and installed package
+      - name: Install checksum-pinned Pandoc for wheel smoke
+        run: uv run --locked python scripts/install_pandoc.py --github-env
+      - name: Prepare verified fonts for wheel smoke
+        run: uv run --locked python scripts/prepare_fonts.py
+      - name: Build wheel and sdist
+        run: uv build
+      - name: Verify tag version and distributions
         env:
           RELEASE_REF: ${{ inputs.release_ref }}
         run: |
-          uv run --locked python -c 'import os; from markdown2docx import __version__; assert os.environ["RELEASE_REF"] == "v" + __version__'
+          uv run --locked python - <<'PY'
+          import os
+          import tarfile
+          from pathlib import Path
+
+          from markdown2docx import __version__
+
+          assert os.environ["RELEASE_REF"] == f"v{__version__}"
+          wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
+          assert len(wheels) == 1, wheels
+          assert len(sdists) == 1, sdists
+          assert wheels[0].name.startswith(f"markdown2docx-{__version__}-")
+          prefix = f"markdown2docx-{__version__}"
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              names = set(archive.getnames())
+          assert f"{prefix}/pyproject.toml" in names
+          assert f"{prefix}/src/markdown2docx/__init__.py" in names
+          PY
           uv venv artifacts/wheel-env --python 3.14
           uv pip install --python artifacts/wheel-env/bin/python dist/*.whl
           uv run --locked python scripts/validate_wheel.py --python artifacts/wheel-env/bin/python
