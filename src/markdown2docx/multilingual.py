@@ -587,11 +587,12 @@ class MultilingualDocument:
                     "Unmarked shared Han characters use Simplified Chinese glyphs; add lang spans for regional forms",
                 )
             marker = f"{self._marker_prefix}{len(self.runs):06d}"
+            run_rtl = local_dir == "rtl" if local_dir is not None else rtl
             self.runs[marker] = RunContext(
                 part,
                 key,
                 lang,
-                rtl and local_dir != "ltr",
+                run_rtl,
                 pdir,
                 name,
                 code,
