@@ -15,6 +15,29 @@ MATRIX_TEST_COMMAND = (
     "uv run --locked pytest --cov=src --cov-branch --cov-report=xml "
     "--cov-report=term-missing --junitxml=artifacts/junit.xml"
 )
+CRITICAL_JOB_IDS = ("quality", "skill", "test")
+CRITICAL_STEP_LOCATIONS = (
+    ("quality", "quality"),
+    ("quality", "actionlint"),
+    ("quality", "pre-commit"),
+    ("skill", "skill-smoke"),
+    ("test", "matrix-test"),
+    ("test", "multilingual-validation"),
+    ("test", "wheel-validation"),
+    ("test", "check-test-evidence"),
+)
+STEP_IF_ALLOWLIST = {
+    "skill-smoke-artifacts": "always()",
+    "required-artifacts": "always()",
+    "preview-artifacts": "always()",
+    "distribution-artifacts": "always()",
+    "windows-junit-gate": "runner.os == 'Windows'",
+    "install-rendering-dependencies": "runner.os == 'Linux'",
+    "install-linux-fixture-fonts": "runner.os == 'Linux'",
+    "render-multilingual": "runner.os == 'Linux'",
+    "publish-testpypi": "inputs.repository == 'testpypi'",
+    "publish-pypi": "inputs.repository == 'pypi'",
+}
 BUILD_STEP_IDS = (
     "require-release-tag",
     "checkout",
@@ -117,6 +140,18 @@ def continue_on_error_errors(workflow):
                     f"job {job_id} step {step.get('id', '<missing id>')} "
                     "defines continue-on-error"
                 )
+    return errors
+
+
+def condition_errors(workflow):
+    errors = []
+    for job_id, job in workflow.get("jobs", {}).items():
+        if "if" in job:
+            errors.append(f"job {job_id} must not define if")
+        for step in job.get("steps", []):
+            step_id = step.get("id", "<missing id>")
+            if "if" in step and step["if"] != STEP_IF_ALLOWLIST.get(step_id):
+                errors.append(f"job {job_id} step {step_id} has a disallowed if")
     return errors
 
 
@@ -317,6 +352,48 @@ def test_reusable_workflow_enforces_windows_junit_skips(test_workflow):
     )
 
 
+def test_required_evidence_is_checked_before_artifact_upload(test_workflow):
+    steps = test_workflow["jobs"]["test"]["steps"]
+    check_indices = [
+        index
+        for index, step in enumerate(steps)
+        if step.get("id") == "check-test-evidence"
+    ]
+    upload_indices = [
+        index
+        for index, step in enumerate(steps)
+        if step.get("id") == "required-artifacts"
+    ]
+
+    assert len(check_indices) == 1
+    assert len(upload_indices) == 1
+    assert check_indices[0] < upload_indices[0]
+    assert steps[check_indices[0]]["run"].strip() == (
+        "uv run --locked python scripts/check_test_evidence.py"
+    )
+
+
+@pytest.mark.parametrize("job_id", CRITICAL_JOB_IDS)
+def test_critical_jobs_are_unconditional(test_workflow, job_id):
+    job = test_workflow["jobs"][job_id]
+
+    assert "if" not in job
+    assert "continue-on-error" not in job
+
+
+@pytest.mark.parametrize(("job_id", "step_id"), CRITICAL_STEP_LOCATIONS)
+def test_critical_steps_are_unconditional(test_workflow, job_id, step_id):
+    step = step_by_id(test_workflow["jobs"][job_id], step_id)
+
+    assert "if" not in step
+    assert "continue-on-error" not in step
+
+
+def test_only_explicit_step_conditions_are_allowed(test_workflow, release_workflow):
+    assert condition_errors(test_workflow) == []
+    assert condition_errors(release_workflow) == []
+
+
 def test_required_and_optional_artifacts_are_fail_closed(
     test_workflow, release_workflow
 ):
@@ -374,6 +451,29 @@ def test_synthetic_continue_on_error_is_rejected(location):
     target["continue-on-error"] = "true"
 
     assert continue_on_error_errors(workflow)
+
+
+@pytest.mark.parametrize(
+    ("job_id", "step_id"),
+    [(job_id, None) for job_id in CRITICAL_JOB_IDS] + list(CRITICAL_STEP_LOCATIONS),
+)
+def test_synthetic_false_if_is_rejected(job_id, step_id):
+    job = {"steps": []}
+    workflow = {"jobs": {job_id: job}}
+    target = job
+    if step_id is not None:
+        target = {"id": step_id}
+        job["steps"].append(target)
+    target["if"] = "false"
+
+    assert condition_errors(workflow)
+
+
+@pytest.mark.parametrize(("step_id", "condition"), STEP_IF_ALLOWLIST.items())
+def test_synthetic_whitelisted_step_condition_is_allowed(step_id, condition):
+    workflow = {"jobs": {"publish": {"steps": [{"id": step_id, "if": condition}]}}}
+
+    assert condition_errors(workflow) == []
 
 
 def test_synthetic_disabled_tag_step_is_rejected():
