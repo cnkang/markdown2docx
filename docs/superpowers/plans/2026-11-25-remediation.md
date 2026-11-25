@@ -71,11 +71,11 @@
 
 **Files:** `.github/workflows/test.yml`, `.github/workflows/release.yml`, `.python-version`
 
-- [ ] Add `.python-version` with `3.14`.
-- [ ] Convert Test jobs to a reusable workflow callable by release.
-- [ ] Make release wait for quality and all three OS jobs for `github.sha`.
-- [ ] Run pre-commit and the same quality command in release.
-- [ ] Validate workflows with actionlint or equivalent and commit `ci: require three-platform release gates`.
+- [x] Add `.python-version` with `3.14`.
+- [x] Convert Test jobs to a reusable workflow callable by release.
+- [x] Make release wait for quality, skill smoke, and all three OS jobs for `github.sha`.
+- [x] Run pre-commit/actionlint and enforce unconditional gates plus complete required evidence.
+- [x] Validate workflows and commit `ci: enforce unconditional gates and required evidence` (`103c22a`).
 
 ### Task 8: Validate distribution entry points and metadata
 
