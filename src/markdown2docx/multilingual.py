@@ -14,7 +14,7 @@ import tempfile
 import unicodedata
 import uuid
 import zipfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -198,6 +198,72 @@ def text_of(node: Any) -> str:
     return text_of(content)
 
 
+def _append_text(events: list[str | None], text: str) -> None:
+    if not text:
+        return
+    if events and events[-1] is not None:
+        events[-1] += text
+    else:
+        events.append(text)
+
+
+@dataclass
+class TextStructure:
+    """Visible paragraph events, where None denotes a hard line break."""
+
+    story: str
+    events: list[str | None] = field(default_factory=list)
+    code: bool = False
+
+    def add_text(self, text: str) -> None:
+        _append_text(self.events, text)
+
+    def add_space(self) -> None:
+        self.add_text(" ")
+
+    def add_break(self) -> None:
+        self.events.append(None)
+
+
+def _story_for_part(name: str) -> str:
+    if name == "word/document.xml":
+        return "document"
+    if name.startswith("word/footnotes"):
+        return "footnotes"
+    if name.startswith("word/endnotes"):
+        return "endnotes"
+    if name.startswith("word/comments"):
+        return "comments"
+    return name
+
+
+def _nearest_paragraph(run: Any) -> Any:
+    return next(
+        (parent for parent in run.iterancestors() if parent.tag == W + "p"), None
+    )
+
+
+def _paragraph_events(paragraph: Any) -> list[str | None]:
+    events: list[str | None] = []
+    for element in paragraph.iter():
+        if element.tag == W + "t":
+            run = next(
+                (parent for parent in element.iterancestors() if parent.tag == W + "r"),
+                None,
+            )
+            style = run.find(W + "rPr/" + W + "rStyle") if run is not None else None
+            # --number-sections adds a writer-generated prefix outside the AST.
+            if style is not None and style.get(W + "val") == "SectionNumber":
+                continue
+            _append_text(events, element.text or "")
+        elif element.tag in {W + "br", W + "cr"} and element.get(W + "type") in {
+            None,
+            "textWrapping",
+        }:
+            events.append(None)
+    return events
+
+
 @dataclass
 class RunContext:
     text: str
@@ -210,6 +276,7 @@ class RunContext:
     character_style: str | None = None
     role: str = "body"
     cjk: str = "cjk-sc"
+    structure: TextStructure | None = None
 
 
 class MultilingualDocument:
@@ -242,6 +309,7 @@ class MultilingualDocument:
         self._warned: set[str] = set()
         self._styled_runs: dict[Any, RunContext] = {}
         self._paragraph_directions: dict[Any, str] = {}
+        self._structures: list[TextStructure] = []
         self._expected_parts: dict[str, Any] = {}
         self._cjk_contexts: dict[tuple[str | None, str], tuple[str, bool]] = {}
 
@@ -272,15 +340,15 @@ class MultilingualDocument:
         return strip_emoji(text)
 
     def annotate(self, *, toc: bool = False) -> dict[str, Any]:
-        self.ast["blocks"] = self._walk(
-            self.ast["blocks"], self.lang, self.base_direction, "", "ltr"
-        )
-        # Titles, subtitles and authors can contain multilingual inline content too.
+        # Pandoc writes the metadata title block before the body.
         for key in ("title", "subtitle", "author"):
             if key in self.ast["meta"]:
                 self.ast["meta"][key] = self._walk(
                     self.ast["meta"][key], self.lang, self.base_direction, "", "ltr"
                 )
+        self.ast["blocks"] = self._walk(
+            self.ast["blocks"], self.lang, self.base_direction, "", "ltr"
+        )
         if self.lang:
             self.ast["meta"]["lang"] = {"t": "MetaString", "c": self.lang}
         else:
@@ -329,6 +397,7 @@ class MultilingualDocument:
         *,
         code: bool = False,
         local_dir: str | None = None,
+        structure: TextStructure | None = None,
     ) -> list[dict[str, Any]]:
         result = []
         cjk, ambiguous = self._context_key(lang, context)
@@ -354,6 +423,7 @@ class MultilingualDocument:
                 self._character_style,
                 role=self._role,
                 cjk=cjk,
+                structure=structure,
             )
             # VerbatimChar overrides custom-style in Pandoc. Carry inline code as
             # text in our own style, then apply its size/font explicitly.
@@ -371,12 +441,21 @@ class MultilingualDocument:
         context: str,
         pdir: str,
         local_dir: str | None = None,
+        structure: TextStructure | None = None,
+        story: str = "document",
     ) -> Any:
         if isinstance(node, list):
             result = []
             for item in node:
                 transformed = self._walk(
-                    item, lang, inherited_dir, context, pdir, local_dir
+                    item,
+                    lang,
+                    inherited_dir,
+                    context,
+                    pdir,
+                    local_dir,
+                    structure,
+                    story,
                 )
                 result.extend(
                     transformed
@@ -407,7 +486,14 @@ class MultilingualDocument:
                 self._character_style = attrs["custom-style"]
             try:
                 node["c"][1] = self._walk(
-                    content[1], lang, inherited_dir, context, pdir, local_dir
+                    content[1],
+                    lang,
+                    inherited_dir,
+                    context,
+                    pdir,
+                    local_dir,
+                    structure,
+                    story,
                 )
             finally:
                 self._character_style = previous_style
@@ -415,23 +501,48 @@ class MultilingualDocument:
         if kind in {"Para", "Plain", "Header", "MetaInlines"}:
             context = text_of(node)
             pdir = inherited_dir if inherited_dir != "auto" else direction(context)
+            structure = TextStructure(story)
+            self._structures.append(structure)
             if kind == "Header":
                 previous_role = self._role
                 self._role = "heading"
                 node["c"][2] = self._walk(
-                    content[2], lang, inherited_dir, context, pdir, local_dir
+                    content[2],
+                    lang,
+                    inherited_dir,
+                    context,
+                    pdir,
+                    local_dir,
+                    structure,
+                    story,
                 )
                 self._role = previous_role
             else:
                 node["c"] = self._walk(
-                    content, lang, inherited_dir, context, pdir, local_dir
+                    content,
+                    lang,
+                    inherited_dir,
+                    context,
+                    pdir,
+                    local_dir,
+                    structure,
+                    story,
                 )
             return node
         if kind == "Str":
+            if structure is not None:
+                structure.add_text(content)
             return self._mark(
-                content, lang, context or content, pdir, local_dir=local_dir
+                content,
+                lang,
+                context or content,
+                pdir,
+                local_dir=local_dir,
+                structure=structure,
             )
         if kind == "Code":
+            if structure is not None:
+                structure.add_text(content[1])
             return self._mark(
                 content[1],
                 lang,
@@ -439,9 +550,25 @@ class MultilingualDocument:
                 pdir,
                 code=True,
                 local_dir="ltr",
+                structure=structure,
             )
+        if kind in {"Space", "SoftBreak"}:
+            if structure is not None:
+                structure.add_space()
+            return node
+        if kind == "LineBreak":
+            if structure is not None:
+                structure.add_break()
+            return node
         if kind == "CodeBlock":
             self.code_blocks.append(content[1])
+            structure = TextStructure(story, code=True)
+            code = content[1].replace("\r\n", "\n").replace("\r", "\n")
+            for index, line in enumerate(code.split("\n")):
+                if index:
+                    structure.add_break()
+                structure.add_text(line)
+            self._structures.append(structure)
             for key, part, _, name in self._fragments(
                 content[1], lang, content[1], code=True
             ):
@@ -451,6 +578,18 @@ class MultilingualDocument:
             if not content[0][0]:
                 content[0][0] = f"{self._marker_prefix}CODE{len(self.code_blocks) - 1}"
             self.code_languages[content[0][0]] = lang
+            return node
+        if kind == "Note":
+            node["c"] = self._walk(
+                content,
+                lang,
+                inherited_dir,
+                "",
+                pdir,
+                local_dir,
+                None,
+                "footnotes",
+            )
             return node
         if kind == "Math":
             self.math = True
@@ -467,7 +606,14 @@ class MultilingualDocument:
             return node
         if content is not None:
             node["c"] = self._walk(
-                content, lang, inherited_dir, context, pdir, local_dir
+                content,
+                lang,
+                inherited_dir,
+                context,
+                pdir,
+                local_dir,
+                structure,
+                story,
             )
         return node
 
@@ -503,6 +649,11 @@ class MultilingualDocument:
         destination_archive: zipfile.ZipFile,
     ) -> dict[str, str]:
         observed: dict[str, str] = {}
+        observed_order: dict[str, list[str]] = {}
+        expected_order: dict[str, list[str]] = {}
+        for marker, spec in self.runs.items():
+            story = spec.structure.story if spec.structure is not None else "document"
+            expected_order.setdefault(story, []).append(marker)
         before: list[str] = []
         after: list[str] = []
         code_text: list[str] = []
@@ -540,6 +691,22 @@ class MultilingualDocument:
                     for value in root.xpath("//m:t/text()", namespaces=NS):
                         self.resolver.resolve("math", self._checked_text(value))
                 before.extend(root.xpath("//w:t/text()", namespaces=NS))
+                story = _story_for_part(info.filename)
+                paragraph_structures: dict[Any, TextStructure] = {}
+                for candidate in root.iter(W + "p"):
+                    found: dict[int, TextStructure] = {}
+                    for run in candidate.iter(W + "r"):
+                        if _nearest_paragraph(run) is not candidate:
+                            continue
+                        run_style = run.find(W + "rPr/" + W + "rStyle")
+                        marker = (
+                            run_style.get(W + "val") if run_style is not None else None
+                        )
+                        spec = self.runs.get(marker)
+                        if spec is not None and spec.structure is not None:
+                            found[id(spec.structure)] = spec.structure
+                    if len(found) == 1:
+                        paragraph_structures[candidate] = next(iter(found.values()))
                 for paragraph in root.iter(W + "p"):
                     style = paragraph.find(W + "pPr/" + W + "pStyle")
                     code = style is not None and style.get(W + "val") in {
@@ -566,11 +733,15 @@ class MultilingualDocument:
                         )
                     marked_paragraph = False
                     for run in list(paragraph.iter(W + "r")):
+                        run_paragraph = _nearest_paragraph(run)
                         run_style = run.find(W + "rPr/" + W + "rStyle")
                         marker = (
                             run_style.get(W + "val") if run_style is not None else None
                         )
                         if marker in self.runs:
+                            order = observed_order.setdefault(story, [])
+                            if not order or order[-1] != marker:
+                                order.append(marker)
                             spec = self.runs[marker]
                             run_spec = spec
                             value = "".join(run.xpath("./w:t/text()", namespaces=NS))
@@ -633,6 +804,11 @@ class MultilingualDocument:
                                 code=code,
                                 lang=code_lang,
                                 context=paragraph_text,
+                                structure=paragraph_structures.get(
+                                    run_paragraph
+                                    if run_paragraph is not None
+                                    else paragraph
+                                ),
                             )
                     if code:
                         self._paragraph(paragraph, "ltr")
@@ -719,6 +895,7 @@ class MultilingualDocument:
                         for index, paragraph in enumerate(root.iter(W + "p"))
                         if paragraph in self._paragraph_directions
                     ],
+                    [item for item in self._structures if item.story == story],
                 )
                 data = etree.tostring(
                     root, xml_declaration=True, encoding="UTF-8", standalone=True
@@ -735,6 +912,9 @@ class MultilingualDocument:
         failures = [
             name for name, spec in self.runs.items() if observed.get(name) != spec.text
         ]
+        for story in sorted(set(expected_order) | set(observed_order)):
+            if observed_order.get(story, []) != expected_order.get(story, []):
+                failures.append(f"{story} marker run order mismatch")
         # Code paragraphs use line breaks instead of newline characters in w:t.
         expected_code = "".join(self.code_blocks).replace("\n", "").replace("\r", "")
         if "".join(code_text) != expected_code:
@@ -763,6 +943,7 @@ class MultilingualDocument:
             for name, (
                 expected_runs,
                 expected_paragraphs,
+                expected_structures,
             ) in self._expected_parts.items():
                 root = etree.fromstring(archive.read(name), parser)
                 all_runs = list(root.iter(W + "r"))
@@ -844,7 +1025,18 @@ class MultilingualDocument:
                             for slot in ("val", "eastAsia", "bidi")
                         ):
                             failures.append(f"{name}: language mismatch")
+                self._verify_structures(
+                    name,
+                    root,
+                    actual_runs,
+                    expected_runs,
+                    expected_structures,
+                    failures,
+                )
                 for index, value in expected_paragraphs:
+                    if index >= len(paragraphs):
+                        failures.append(f"{name}: paragraph direction count mismatch")
+                        continue
                     element = paragraphs[index].find(W + "pPr/" + W + "bidi")
                     if element is None or element.get(W + "val") != (
                         "1" if value == "rtl" else "0"
@@ -852,6 +1044,78 @@ class MultilingualDocument:
                         failures.append(f"{name}: paragraph direction mismatch")
         if failures:
             raise ValidationError(str(path), failures[:10])
+
+    def _verify_structures(
+        self,
+        name: str,
+        root: Any,
+        actual_runs: list[Any],
+        expected_runs: list[RunContext],
+        expected_structures: list[TextStructure],
+        failures: list[str],
+    ) -> None:
+        if "RAW_CONTENT_UNVERIFIED" in self._warned:
+            return
+        paragraphs = list(root.iter(W + "p"))
+        paragraph_indices = {
+            paragraph: index for index, paragraph in enumerate(paragraphs)
+        }
+        expected_groups: list[TextStructure] = []
+        for spec in expected_runs:
+            if spec.structure is not None and (
+                not expected_groups or expected_groups[-1] is not spec.structure
+            ):
+                expected_groups.append(spec.structure)
+        actual_groups: list[int | None] = []
+        for index, run in enumerate(actual_runs[: len(expected_runs)]):
+            if expected_runs[index].structure is None:
+                continue
+            paragraph_index = paragraph_indices.get(_nearest_paragraph(run))
+            if not actual_groups or actual_groups[-1] != paragraph_index:
+                actual_groups.append(paragraph_index)
+        if len(actual_groups) != len(expected_groups):
+            failures.append(f"{name}: paragraph structure count mismatch")
+        else:
+            for expected, paragraph_index in zip(
+                expected_groups, actual_groups, strict=True
+            ):
+                if paragraph_index is None:
+                    failures.append(f"{name}: paragraph structure parent mismatch")
+                    continue
+                actual_events = _paragraph_events(paragraphs[paragraph_index])
+                # Pandoc separates footnote references from note text with a space.
+                if (
+                    expected.story == "footnotes"
+                    and actual_events
+                    and isinstance(actual_events[0], str)
+                    and actual_events[0].startswith(" ")
+                    and not (
+                        expected.events
+                        and isinstance(expected.events[0], str)
+                        and expected.events[0].startswith(" ")
+                    )
+                ):
+                    actual_events[0] = actual_events[0][1:]
+                    if not actual_events[0]:
+                        actual_events.pop(0)
+                if actual_events != expected.events:
+                    failures.append(f"{name}: paragraph text structure mismatch")
+        expected_code = [item for item in expected_structures if item.code]
+        actual_code = [
+            paragraph
+            for paragraph in paragraphs
+            if (
+                paragraph.find(W + "pPr/" + W + "pStyle") is not None
+                and paragraph.find(W + "pPr/" + W + "pStyle").get(W + "val")
+                in {"SourceCode", "CodeBlock"}
+            )
+        ]
+        if len(actual_code) != len(expected_code):
+            failures.append(f"{name}: code block structure count mismatch")
+        else:
+            for expected, paragraph in zip(expected_code, actual_code, strict=True):
+                if _paragraph_events(paragraph) != expected.events:
+                    failures.append(f"{name}: code block line structure mismatch")
 
     def _run_properties_contain_text(self, run: Any) -> bool:
         return any(
@@ -907,6 +1171,7 @@ class MultilingualDocument:
         code: bool,
         lang: str | None,
         context: str,
+        structure: TextStructure | None = None,
     ) -> None:
         cjk = self._context_key(lang, context)[0]
         parts = fragments(text, lang, context, code=code, cjk=cjk)
@@ -937,6 +1202,7 @@ class MultilingualDocument:
                     code,
                     role=self._role,
                     cjk=cjk,
+                    structure=structure,
                 ),
             )
             return
@@ -983,6 +1249,7 @@ class MultilingualDocument:
                         code,
                         role=self._role,
                         cjk=cjk,
+                        structure=structure,
                     ),
                 )
                 replacements.append(clone)
