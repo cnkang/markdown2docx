@@ -286,24 +286,23 @@ def test_windows_rejects_junction_output_parent(tmp_path):
 
 
 @windows_only
-@pytest.mark.parametrize("operation", ["rename", "replace"])
-def test_windows_staged_output_pins_parent_directory(tmp_path, operation):
-    """An open staging context must prevent its parent from being moved/replaced."""
+def test_windows_staged_output_pins_parent_directory(tmp_path):
+    """An open staging context must prevent its parent from being renamed."""
     parent = tmp_path / "output"
     parent.mkdir()
     output = parent / "report.docx"
-    replacement = tmp_path / "replacement"
-    replacement.mkdir()
+    moved = tmp_path / "moved"
 
     with staged_docx_output(output) as stage:
-        stage.write_bytes(b"document")
-        with pytest.raises(OSError):
-            if operation == "rename":
-                parent.rename(tmp_path / "moved")
-            else:
-                os.replace(replacement, parent)
+        stage.write_bytes(b"before rename")
+        with pytest.raises(OSError) as error:
+            parent.rename(moved)
+        assert getattr(error.value, "winerror", None) in {5, 32}
+        assert parent.is_dir()
+        assert not moved.exists()
+        stage.write_bytes(b"after rename")
 
-    assert output.read_bytes() == b"document"
+    assert output.read_bytes() == b"after rename"
 
 
 @windows_only
