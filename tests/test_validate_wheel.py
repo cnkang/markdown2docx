@@ -3,8 +3,11 @@
 import importlib.util
 import io
 import json
+import subprocess
 import tarfile
+import tempfile
 import tomllib
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -128,6 +131,22 @@ def write_sdist(directory, *, files=None, omit=()):
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
     return path
+
+
+def write_member_sdist(directory, members):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{SDIST_ROOT}.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        for member, data in members:
+            source = io.BytesIO(data) if member.isfile() else None
+            archive.addfile(member, source)
+    return path
+
+
+def file_member(name, data=b"payload"):
+    member = tarfile.TarInfo(name)
+    member.size = len(data)
+    return member, data
 
 
 def write_complete_distribution(directory):
@@ -428,6 +447,177 @@ def test_sdist_extraction_rejects_path_traversal(validator, tmp_path):
     assert not (tmp_path / "escape.py").exists()
 
 
+def test_sdist_extraction_rejects_casefold_collisions(validator, tmp_path):
+    sdist = write_sdist(
+        tmp_path,
+        files=sdist_files(**{f"{SDIST_ROOT}/readme.md": b"collision\n"}),
+    )
+
+    with pytest.raises(ValueError, match="casefold|collision"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_extraction_rejects_unicode_nfc_collisions(validator, tmp_path):
+    composed = unicodedata.normalize("NFC", "caf\u00e9.txt")
+    decomposed = unicodedata.normalize("NFD", "caf\u00e9.txt")
+    assert composed != decomposed
+    files = sdist_files(
+        **{
+            f"{SDIST_ROOT}/{composed}": b"composed\n",
+            f"{SDIST_ROOT}/{decomposed}": b"decomposed\n",
+        }
+    )
+    sdist = write_sdist(tmp_path, files=files)
+
+    with pytest.raises(ValueError, match="NFC|collision"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "trailing space ",
+        "trailing dot.",
+        "nested/trailing space ",
+        "nested/trailing dot.",
+        "C:drive.txt",
+        "nested/C:drive.txt",
+        "CON",
+        "PRN.txt",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM9.log",
+        "LPT1",
+        "LPT9.txt",
+    ],
+)
+def test_sdist_extraction_rejects_windows_unsafe_names(validator, tmp_path, name):
+    sdist = write_sdist(
+        tmp_path,
+        files=sdist_files(**{f"{SDIST_ROOT}/{name}": b"unsafe\n"}),
+    )
+
+    with pytest.raises(ValueError, match="Windows|trailing|colon|device|reserved"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "/absolute.txt",
+        f"{SDIST_ROOT}//double-slash.txt",
+        f"{SDIST_ROOT}/./dot.txt",
+        f"{SDIST_ROOT}/../parent.txt",
+        "C:/absolute.txt",
+        r"root\absolute.txt",
+    ],
+)
+def test_sdist_extraction_rejects_unsafe_archive_paths(validator, tmp_path, name):
+    member, data = file_member(name)
+    sdist = write_member_sdist(tmp_path, [(member, data)])
+
+    with pytest.raises(ValueError, match="unsafe|member|path"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+@pytest.mark.parametrize(
+    ("member_type", "linkname"),
+    [
+        (tarfile.SYMTYPE, "../outside"),
+        (tarfile.LNKTYPE, f"{SDIST_ROOT}/README.md"),
+        (tarfile.CHRTYPE, ""),
+        (tarfile.BLKTYPE, ""),
+        (tarfile.FIFOTYPE, ""),
+    ],
+)
+def test_sdist_extraction_rejects_special_member_types(
+    validator, tmp_path, member_type, linkname
+):
+    member = tarfile.TarInfo(f"{SDIST_ROOT}/unsafe")
+    member.type = member_type
+    member.linkname = linkname
+    sdist = write_member_sdist(tmp_path, [(member, b"")])
+
+    with pytest.raises(ValueError, match="type|symlink|hardlink|device|FIFO|unsafe"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_extraction_rejects_file_directory_collisions(validator, tmp_path):
+    files = sdist_files()
+    files[f"{SDIST_ROOT}/collision"] = b"file\n"
+    files[f"{SDIST_ROOT}/collision/child.txt"] = b"child\n"
+    sdist = write_sdist(tmp_path, files=files)
+
+    with pytest.raises(ValueError, match="collision"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_extraction_enforces_entry_count_limit(validator, tmp_path, monkeypatch):
+    contents = sdist_files()
+    monkeypatch.setattr(validator, "MAX_SDIST_MEMBERS", len(contents) - 1)
+    sdist = write_sdist(tmp_path, files=contents)
+
+    with pytest.raises(ValueError, match="entry count|members|limit"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_extraction_enforces_total_size_limit(validator, tmp_path, monkeypatch):
+    contents = sdist_files()
+    total_size = sum(len(data) for data in contents.values())
+    monkeypatch.setattr(validator, "MAX_SDIST_UNCOMPRESSED_BYTES", total_size - 1)
+    sdist = write_sdist(tmp_path, files=contents)
+
+    with pytest.raises(ValueError, match="total size|bytes|limit"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_extraction_accepts_exact_resource_limits(
+    validator, tmp_path, monkeypatch
+):
+    contents = sdist_files()
+    monkeypatch.setattr(validator, "MAX_SDIST_MEMBERS", len(contents))
+    monkeypatch.setattr(
+        validator,
+        "MAX_SDIST_UNCOMPRESSED_BYTES",
+        sum(len(data) for data in contents.values()),
+    )
+    sdist = write_sdist(tmp_path, files=contents)
+
+    root = validator.extract_sdist(sdist, tmp_path / "extracted")
+
+    assert (root / "pyproject.toml").read_bytes() == PYPROJECT
+
+
+def test_sdist_extraction_uses_tarfile_data_filter(validator, tmp_path, monkeypatch):
+    original_filter = tarfile.data_filter
+    filtered = []
+
+    def record_filter(member, path):
+        filtered.append(member.name)
+        return original_filter(member, path)
+
+    monkeypatch.setattr(validator.tarfile, "data_filter", record_filter)
+    sdist = write_sdist(tmp_path)
+
+    validator.extract_sdist(sdist, tmp_path / "extracted")
+
+    assert filtered == list(sdist_files())
+
+
+def test_sdist_extraction_rejects_preexisting_root_symlink(validator, tmp_path):
+    destination = tmp_path / "extracted"
+    destination.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (destination / SDIST_ROOT).symlink_to(outside, target_is_directory=True)
+    sdist = write_sdist(tmp_path)
+
+    with pytest.raises(ValueError, match="exists|root|path"):
+        validator.extract_sdist(sdist, destination)
+    assert list(outside.iterdir()) == []
+
+
 @pytest.mark.parametrize("kind", ["wheel", "sdist"])
 def test_empty_artifact_is_rejected(validator, tmp_path, kind):
     suffix = ".whl" if kind == "wheel" else ".tar.gz"
@@ -467,6 +657,137 @@ def test_distribution_directory_requires_exactly_one_of_each(validator, tmp_path
         validator.validate_distribution_directory(tmp_path, VERSION)
 
 
+def orchestration_dependencies(validator, tmp_path, events, fail_event=None):
+    wheel = tmp_path / "published.whl"
+    sdist = tmp_path / "published.tar.gz"
+    rebuilt = tmp_path / "rebuilt.whl"
+    artifacts = validator.DistributionArtifacts(
+        wheel=validator.WheelInfo(
+            wheel, VERSION, {PROJECT_NAME: validator.CONSOLE_TARGET}
+        ),
+        sdist=validator.SdistInfo(sdist, VERSION),
+    )
+    temporary_directories = []
+
+    def record(name):
+        events.append(name)
+        if name == fail_event:
+            raise validator.DistributionError(f"injected failure: {name}")
+
+    def temporary_directory(*, prefix):
+        directory = tempfile.TemporaryDirectory(prefix=prefix)
+        temporary_directories.append(directory)
+        return directory
+
+    def validate_distribution_directory(directory, expected_version):
+        record("validate-distribution")
+        return artifacts
+
+    def install_and_smoke(*args, **kwargs):
+        record(f"install-smoke:{kwargs['conversion']}")
+
+    def extract_sdist(path, destination):
+        record("extract-sdist")
+        return tmp_path / "source"
+
+    def run(*args, **kwargs):
+        record("run-rebuild")
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    def select_artifact(directory, suffix, label):
+        record("select-rebuilt")
+        return rebuilt
+
+    def validate_wheel(path, expected_version):
+        record("validate-wheel")
+        return validator.WheelInfo(
+            path, expected_version, {PROJECT_NAME: validator.CONSOLE_TARGET}
+        )
+
+    dependencies = validator.DistributionDependencies(
+        validate_distribution_directory=validate_distribution_directory,
+        find_uv=lambda command: str(tmp_path / "uv"),
+        temporary_directory=temporary_directory,
+        install_and_smoke=install_and_smoke,
+        extract_sdist=extract_sdist,
+        run=run,
+        select_artifact=select_artifact,
+        validate_wheel=validate_wheel,
+    )
+    return dependencies, temporary_directories
+
+
+def test_main_orchestrates_every_distribution_step_and_cleans_workspace(
+    validator, tmp_path
+):
+    events = []
+    dependencies, temporary_directories = orchestration_dependencies(
+        validator, tmp_path, events
+    )
+
+    result = validator.main(
+        [
+            "--dist-dir",
+            str(tmp_path / "dist"),
+            "--expected-version",
+            VERSION,
+            "--uv",
+            str(tmp_path / "uv"),
+        ],
+        dependencies=dependencies,
+    )
+
+    assert result == 0
+    assert events == [
+        "validate-distribution",
+        "install-smoke:True",
+        "extract-sdist",
+        "run-rebuild",
+        "select-rebuilt",
+        "validate-wheel",
+        "install-smoke:False",
+    ]
+    assert len(temporary_directories) == 1
+    assert not Path(temporary_directories[0].name).exists()
+
+
+@pytest.mark.parametrize(
+    "fail_event",
+    [
+        "validate-distribution",
+        "install-smoke:True",
+        "extract-sdist",
+        "run-rebuild",
+        "select-rebuilt",
+        "validate-wheel",
+        "install-smoke:False",
+    ],
+)
+def test_main_fails_and_cleans_workspace_when_any_step_fails(
+    validator, tmp_path, fail_event
+):
+    events = []
+    dependencies, temporary_directories = orchestration_dependencies(
+        validator, tmp_path, events, fail_event=fail_event
+    )
+
+    result = validator.main(
+        [
+            "--dist-dir",
+            str(tmp_path / "dist"),
+            "--expected-version",
+            VERSION,
+            "--uv",
+            str(tmp_path / "uv"),
+        ],
+        dependencies=dependencies,
+    )
+
+    assert result == 1
+    assert events[-1] == fail_event
+    assert all(not Path(directory.name).exists() for directory in temporary_directories)
+
+
 def test_project_version_comes_from_pyproject(validator, tmp_path):
     project = tmp_path / "pyproject.toml"
     project.write_bytes(PYPROJECT)
@@ -475,12 +796,13 @@ def test_project_version_comes_from_pyproject(validator, tmp_path):
 
 
 def test_sdist_rebuild_uses_only_the_wheel_target(validator, tmp_path):
+    uv = tmp_path / "uv"
     command = validator.sdist_rebuild_command(
-        Path("/tools/uv"), tmp_path / "source", tmp_path / "rebuilt"
+        uv, tmp_path / "source", tmp_path / "rebuilt"
     )
 
     assert command == [
-        "/tools/uv",
+        str(uv),
         "build",
         "--wheel",
         "--out-dir",
