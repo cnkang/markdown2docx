@@ -149,7 +149,10 @@ jobs:
       - name: Prepare verified fonts before offline tests
         run: uv run --locked python scripts/prepare_fonts.py
       - name: Run regression and mixed-language tests
-        run: uv run --locked pytest --cov=src --cov-branch --cov-report=xml --cov-report=term-missing
+        run: uv run --locked pytest --cov=src --cov-branch --cov-report=xml --cov-report=term-missing --junitxml=artifacts/junit.xml
+      - name: Audit Windows test skips
+        if: runner.os == 'Windows'
+        run: uv run --locked python scripts/check_test_skips.py artifacts/junit.xml
       - name: Validate the comprehensive Markdown fixture
         run: uv run --locked python scripts/validate_multilingual.py --offline --output-dir artifacts/multilingual
       - name: Install rendering dependencies
@@ -191,5 +194,6 @@ jobs:
           path: |
             artifacts/multilingual/
             artifacts/dist/
+            artifacts/junit.xml
             coverage.xml
           if-no-files-found: warn
