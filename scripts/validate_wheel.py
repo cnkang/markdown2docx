@@ -4,9 +4,11 @@
 import argparse
 import configparser
 import csv
+import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess  # nosec B404
@@ -22,6 +24,7 @@ from dataclasses import dataclass
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 PROJECT_NAME = "markdown2docx"
 CONSOLE_SCRIPT = "markdown2docx"
@@ -36,7 +39,13 @@ WINDOWS_DEVICE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
+    | {"COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3"}
 )
+WINDOWS_83_ALIAS = re.compile(
+    r"^(?P<base>[A-Za-z0-9_$!#%&'()@^`{}-]{1,6})~[1-9]"
+    r"(?:\.(?P<extension>[A-Za-z0-9]{1,3}))?$"
+)
+WINDOWS_83_CHARACTERS = frozenset("_-$~!#%&'()@^`{}")
 REQUIRED_PACKAGE_FILES = (
     "__init__.py",
     "cli.py",
@@ -145,6 +154,69 @@ def _sdist_member_path(name: str) -> PurePosixPath:
     return path
 
 
+def _windows_83_name_parts(name: str) -> tuple[str, str]:
+    base, separator, extension = name.rpartition(".")
+    if not separator:
+        return name, ""
+    return base, extension
+
+
+def _is_windows_83_short_character(character: str) -> bool:
+    return character.isascii() and (
+        character.isalnum() or character in WINDOWS_83_CHARACTERS
+    )
+
+
+def _windows_83_alias_conflicts(alias: str, candidate: str) -> bool:
+    match = WINDOWS_83_ALIAS.fullmatch(alias)
+    if match is None or "~" in candidate:
+        return False
+    base, extension = _windows_83_name_parts(candidate)
+    if (
+        len(base) <= 8
+        and len(extension) <= 3
+        and all(
+            _is_windows_83_short_character(character) for character in base + extension
+        )
+    ):
+        return False
+    short_base = "".join(
+        character
+        for character in base
+        if _is_windows_83_short_character(character) and character != "~"
+    )[:6].casefold()
+    short_extension = "".join(
+        character
+        for character in extension
+        if character.isascii() and character.isalnum()
+    )[:3].casefold()
+    return (
+        match.group("base").casefold() == short_base
+        and (match.group("extension") or "").casefold() == short_extension
+    )
+
+
+def _reject_windows_83_alias_collisions(
+    identities: Mapping[str, tarfile.TarInfo],
+) -> None:
+    sibling_groups = {}
+    for identity in identities:
+        parts = PurePosixPath(identity).parts
+        for index, part in enumerate(parts):
+            parent = unicodedata.normalize("NFC", "/".join(parts[:index])).casefold()
+            normalized_part = unicodedata.normalize("NFC", part).casefold()
+            sibling_groups.setdefault(parent, {})[normalized_part] = part
+    for siblings in sibling_groups.values():
+        for alias in siblings.values():
+            if WINDOWS_83_ALIAS.fullmatch(alias) is None:
+                continue
+            for candidate in siblings.values():
+                if alias != candidate and _windows_83_alias_conflicts(alias, candidate):
+                    raise DistributionError(
+                        f"Potential Windows 8.3 alias collision: {alias!r} and {candidate!r}"
+                    )
+
+
 def _validate_sdist_members(members: Sequence[tarfile.TarInfo]) -> None:
     if len(members) > MAX_SDIST_MEMBERS:
         raise DistributionError(
@@ -187,6 +259,7 @@ def _validate_sdist_members(members: Sequence[tarfile.TarInfo]) -> None:
                     "Sdist file/directory collision: "
                     f"{original_parent!r} and {normalized_names[normalized]!r}"
                 )
+    _reject_windows_83_alias_collisions(identities)
 
 
 def _reject_unwanted_members(names: Sequence[str], *, wheel: bool) -> None:
@@ -491,6 +564,45 @@ def _sdist_target(root: Path, member_name: str) -> Path:
     return target
 
 
+def _sha256_stream(stream: BinaryIO) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    while chunk := stream.read(1024 * 1024):
+        size += len(chunk)
+        digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+def _archive_member_digest(
+    archive: tarfile.TarFile, member: tarfile.TarInfo
+) -> tuple[int, str]:
+    source = archive.extractfile(member)
+    if source is None:
+        raise DistributionError(f"Unable to read sdist member: {member.name}")
+    with source:
+        content = _sha256_stream(source)
+    if content[0] != member.size:
+        raise DistributionError(f"Sdist archive member size mismatch: {member.name}")
+    return content
+
+
+def _verify_extracted_sdist_content(
+    root: Path, expected: Mapping[str, tuple[int, str]]
+) -> None:
+    for identity, archived_content in expected.items():
+        target = _sdist_target(root, identity)
+        if not target.is_file() or target.is_symlink():
+            raise DistributionError(
+                f"Extracted sdist member is not a regular file: {identity}"
+            )
+        with target.open("rb") as stream:
+            extracted_content = _sha256_stream(stream)
+        if extracted_content != archived_content:
+            raise DistributionError(
+                f"Extracted sdist content mismatch (SHA-256/size): {identity}"
+            )
+
+
 def extract_sdist(path: Path, destination: Path) -> Path:
     """Safely extract a bounded sdist beneath its single resolved project root."""
     _require_artifact(path, "sdist")
@@ -516,6 +628,13 @@ def extract_sdist(path: Path, destination: Path) -> Path:
                 )
             for member in members:
                 _sdist_target(root, member.name)
+            expected_contents = {
+                str(_sdist_member_path(member.name)): _archive_member_digest(
+                    archive, member
+                )
+                for member in members
+                if member.isfile()
+            }
             # Members are bounded and tarfile's data filter rejects unsafe metadata.
             archive.extractall(  # nosec B202
                 path=destination, filter=tarfile.data_filter
@@ -524,6 +643,7 @@ def extract_sdist(path: Path, destination: Path) -> Path:
                 raise DistributionError(f"Sdist extraction root is invalid: {root}")
             for member in members:
                 _sdist_target(root, member.name)
+            _verify_extracted_sdist_content(root, expected_contents)
     except DistributionError:
         raise
     except (EOFError, OSError, tarfile.TarError) as error:
