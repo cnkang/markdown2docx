@@ -12,7 +12,8 @@ REQUIRED_WINDOWS_OUTPUT_CASES = (
     "test_windows_rejects_junction_output_parent",
     "test_windows_staged_output_pins_parent_directory",
     "test_windows_no_overwrite_preserves_existing_file",
-    "test_windows_writer_failure_preserves_existing_file",
+    "test_windows_writer_failure_preserves_existing_file[conversion]",
+    "test_windows_writer_failure_preserves_existing_file[template]",
     "test_windows_validation_failure_preserves_existing_file",
     "test_windows_rejects_real_casefolded_input_output_alias",
 )
@@ -45,15 +46,7 @@ def write_junit(tmp_path, cases):
 
 
 def required_windows_cases():
-    cases = []
-    for name in REQUIRED_WINDOWS_OUTPUT_CASES:
-        junit_name = (
-            f"{name}[conversion]"
-            if name == "test_windows_writer_failure_preserves_existing_file"
-            else name
-        )
-        cases.append(("tests.test_output", junit_name, None))
-    return cases
+    return [("tests.test_output", name, None) for name in REQUIRED_WINDOWS_OUTPUT_CASES]
 
 
 def write_complete_report(tmp_path, extra_cases=()):
@@ -137,6 +130,41 @@ def test_windows_rejects_missing_required_output_case(load_skip_checker, tmp_pat
 
     assert len(violations) == 1
     assert REQUIRED_WINDOWS_OUTPUT_CASES[0] in violations[0]
+    assert "missing required Windows output case" in violations[0]
+
+
+def test_windows_rejects_missing_writer_template_variant(load_skip_checker, tmp_path):
+    skip_checker = load_skip_checker()
+    required_name = "test_windows_writer_failure_preserves_existing_file[template]"
+    cases = [case for case in required_windows_cases() if case[1] != required_name]
+    report = write_junit(tmp_path, cases)
+
+    violations = skip_checker.find_unexpected_skips(report, windows=True)
+
+    assert len(violations) == 1
+    assert required_name in violations[0]
+    assert "missing required Windows output case" in violations[0]
+
+
+def test_windows_wrong_writer_variant_cannot_replace_required_case(
+    load_skip_checker, tmp_path
+):
+    skip_checker = load_skip_checker()
+    required_name = "test_windows_writer_failure_preserves_existing_file[conversion]"
+    cases = [case for case in required_windows_cases() if case[1] != required_name]
+    cases.append(
+        (
+            "tests.test_output",
+            "test_windows_writer_failure_preserves_existing_file[other]",
+            None,
+        )
+    )
+    report = write_junit(tmp_path, cases)
+
+    violations = skip_checker.find_unexpected_skips(report, windows=True)
+
+    assert len(violations) == 1
+    assert required_name in violations[0]
     assert "missing required Windows output case" in violations[0]
 
 
