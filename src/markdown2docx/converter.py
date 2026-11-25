@@ -308,6 +308,16 @@ class MarkdownToDocxConverter:
                 resolver.aliases[role] = resolver.audit_family(
                     family, allow_unverified=allow
                 )
+        toc_metadata = metadata.get("toc")
+        effective_toc = (
+            toc
+            or (
+                isinstance(toc_metadata, dict)
+                and toc_metadata.get("t") == "MetaBool"
+                and bool(toc_metadata.get("c"))
+            )
+            or "--toc" in args
+        )
         document = MultilingualDocument(
             ast,
             resolver,
@@ -317,7 +327,7 @@ class MarkdownToDocxConverter:
         )
         document.code_size_pt = self.config.template.code_size_pt
         document.limits = self.config.limits
-        annotated = document.annotate(toc=toc)
+        annotated = document.annotate(toc=effective_toc)
         timings["annotate_fonts"] = perf_counter() - annotated_start
         with tempfile.TemporaryDirectory(prefix="md2docx-convert-") as temporary:
             root = Path(temporary)
