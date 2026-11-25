@@ -112,3 +112,14 @@ def test_missing_uv_returns_127_without_running_a_command(
     which.assert_called_once_with("uv")
     call.assert_not_called()
     assert "requires uv" in capsys.readouterr().err
+
+
+def test_skill_documents_all_offline_boundaries():
+    skill = (REPO_ROOT / "skills" / "markdown-to-docx" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "prevents uv from fetching the pinned package or Python 3.14" in skill
+    assert "prevents the converter from downloading fonts" in skill
+    assert "pass `--resources-offline`" in skill
+    assert "uv offline mode is not a Pandoc sandbox" in skill
