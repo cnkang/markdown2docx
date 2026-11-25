@@ -551,6 +551,18 @@ def test_verify_output_rejects_text_run_stream_corruption(
             "<w:r><w:t>one</w:t></w:r><w:r><w:br/></w:r></w:p>",
             id="trailing-blank-line",
         ),
+        pytest.param(
+            "one\u2028two",
+            '<w:p><w:pPr><w:pStyle w:val="SourceCode"/></w:pPr>'
+            "<w:r><w:t>one\u2028two</w:t></w:r></w:p>",
+            id="unicode-line-separator",
+        ),
+        pytest.param(
+            "one\u0085two",
+            '<w:p><w:pPr><w:pStyle w:val="SourceCode"/></w:pPr>'
+            "<w:r><w:t>one\u0085two</w:t></w:r></w:p>",
+            id="next-line",
+        ),
     ],
 )
 def test_code_block_line_expectations_follow_text_lines(tmp_path, code, paragraph):
@@ -637,6 +649,61 @@ def test_duplicate_code_bookmark_on_plain_div_does_not_pollute_code_text(
     )
 
 
+def test_same_text_code_bookmark_collision_uses_real_code_block(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    code_block = {"t": "CodeBlock", "c": [["shared", ["text"], []], "same"]}
+    document = MultilingualDocument(
+        {
+            "meta": {},
+            "blocks": [
+                {
+                    "t": "Div",
+                    "c": [
+                        ["shared", [], [["custom-style", "SourceCode"]]],
+                        [{"t": "Para", "c": [{"t": "Str", "c": "same"}]}],
+                    ],
+                },
+                {
+                    "t": "Div",
+                    "c": [["", [], [["lang", "ja"]]], [code_block]],
+                },
+            ],
+        },
+        FontResolver(),
+        lang="en",
+    )
+    document.annotate()
+    marker = next(iter(document.runs))
+    path = generated_body_docx(
+        tmp_path,
+        '<w:bookmarkStart w:id="1" w:name="_shared"/>'
+        '<w:p><w:pPr><w:pStyle w:val="SourceCode"/></w:pPr>'
+        f'<w:r><w:rPr><w:rStyle w:val="{marker}"/></w:rPr>'
+        "<w:t>same</w:t></w:r></w:p>"
+        '<w:bookmarkEnd w:id="1"/>'
+        '<w:bookmarkStart w:id="2" w:name="_shared"/>'
+        '<w:p><w:pPr><w:pStyle w:val="SourceCode"/></w:pPr>'
+        "<w:r><w:t>same</w:t></w:r></w:p>"
+        '<w:bookmarkEnd w:id="2"/>',
+    )
+    assert document.apply(path)["text_integrity"] == "passed"
+    paragraphs = parts(path)["word/document.xml"].findall(W + "body/" + W + "p")
+    assert [
+        paragraph.find(W + "r/" + W + "rPr/" + W + "rFonts").get(W + "ascii")
+        for paragraph in paragraphs
+    ] == ["Noto Sans", "Noto Sans Mono"]
+    assert [
+        paragraph.find(W + "r/" + W + "rPr/" + W + "lang").get(W + "val")
+        for paragraph in paragraphs
+    ] == ["en", "ja"]
+    assert [
+        paragraph.find(W + "r/" + W + "rPr/" + W + "rtl").get(W + "val")
+        for paragraph in paragraphs
+    ] == ["0", "0"]
+    assert paragraphs[1].find(W + "pPr/" + W + "bidi").get(W + "val") == "0"
+
+
 def test_source_code_paragraph_style_is_not_a_code_block(tmp_path):
     source = tmp_path / "input.md"
     source.write_text(
@@ -667,6 +734,23 @@ def test_section_number_style_is_verified_without_number_sections(tmp_path):
     assert report.checks["text_integrity"] == "passed"
     root = parts(output)["word/document.xml"]
     assert root.xpath("//w:body/w:p/w:r/w:t/text()", namespaces=NS) == ["real"]
+    assert root.xpath(
+        "//w:body/w:p/w:r/w:rPr/w:rStyle[@w:val='SectionNumber']",
+        namespaces=NS,
+    )
+
+
+@pytest.mark.parametrize("text", ["real", "123"])
+def test_user_section_number_style_survives_number_sections(tmp_path, text):
+    source = tmp_path / "input.md"
+    source.write_text(f'[{text}]{{custom-style="SectionNumber"}}\n', encoding="utf-8")
+    output = tmp_path / "output.docx"
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, output, extra_args=["--number-sections"]
+    )
+    assert report.checks["text_integrity"] == "passed"
+    root = parts(output)["word/document.xml"]
+    assert root.xpath("//w:body/w:p/w:r/w:t/text()", namespaces=NS) == [text]
     assert root.xpath(
         "//w:body/w:p/w:r/w:rPr/w:rStyle[@w:val='SectionNumber']",
         namespaces=NS,
@@ -854,6 +938,71 @@ def test_verify_output_rejects_structural_text_corruption(
     assert output.read_bytes() == b"original"
 
 
+@pytest.mark.parametrize("mode", ["metadata", "args"])
+@pytest.mark.parametrize("corruption", ["split", "merge"])
+def test_effective_toc_title_is_modeled_and_verified(
+    tmp_path, monkeypatch, mode, corruption
+):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    source = tmp_path / "input.md"
+    metadata = "toc: true\n" if mode == "metadata" else ""
+    source.write_text(
+        f"---\n{metadata}toc-title: Long Contents\n---\n\n# Heading\n\nBody\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    output.write_bytes(b"original")
+    seen_toc = []
+    annotate = MultilingualDocument.annotate
+
+    def record_toc(self, *, toc=False):
+        seen_toc.append(toc)
+        return annotate(self, toc=toc)
+
+    monkeypatch.setattr(MultilingualDocument, "annotate", record_toc)
+    verify = MultilingualDocument._verify_output
+
+    def corrupt_then_verify(self, candidate):
+        def corrupt(root):
+            title = root.xpath(
+                "//w:p[w:pPr/w:pStyle[@w:val='TOCHeading']]", namespaces=NS
+            )[0]
+            heading = root.xpath(
+                "//w:body/w:p[w:pPr/w:pStyle[@w:val='Heading1']]", namespaces=NS
+            )[0]
+            children = [child for child in title if child.tag != W + "pPr"]
+            if corruption == "split":
+                split_at = max(1, len(children) // 2)
+                second = etree.Element(W + "p")
+                props = title.find(W + "pPr")
+                if props is not None:
+                    second.append(copy.deepcopy(props))
+                for child in children[split_at:]:
+                    second.append(child)
+                parent = title.getparent()
+                parent.insert(parent.index(title) + 1, second)
+            else:
+                insert_at = 1 if heading.find(W + "pPr") is not None else 0
+                for offset, child in enumerate(children):
+                    heading.insert(insert_at + offset, child)
+                title.getparent().remove(title)
+
+        rewrite_docx(candidate, {"word/document.xml": corrupt})
+        verify(self, candidate)
+
+    monkeypatch.setattr(MultilingualDocument, "_verify_output", corrupt_then_verify)
+    with pytest.raises(ValidationError):
+        MarkdownToDocxConverter().convert(
+            source,
+            output,
+            toc=False,
+            extra_args=["--toc"] if mode == "args" else None,
+        )
+    assert output.read_bytes() == b"original"
+    assert seen_toc == [True]
+
+
 def test_structural_errors_report_paragraph_and_events(tmp_path, monkeypatch):
     from markdown2docx.multilingual import MultilingualDocument
 
@@ -881,6 +1030,38 @@ def test_structural_errors_report_paragraph_and_events(tmp_path, monkeypatch):
         "paragraph 0" in message and "expected" in message and "actual" in message
         for message in error.value.validation_errors
     )
+
+
+def test_structural_error_event_repr_is_truncated(tmp_path, monkeypatch):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    source = tmp_path / "input.md"
+    source.write_text("a" * 600 + " " + "b" * 600 + "\n", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    output.write_bytes(b"original")
+    verify = MultilingualDocument._verify_output
+
+    def delete_space_then_verify(self, candidate):
+        def delete_space(root):
+            node = root.xpath("//w:body/w:p/w:r/w:t[text()=' ']", namespaces=NS)[0]
+            node.text = ""
+
+        rewrite_docx(candidate, {"word/document.xml": delete_space})
+        verify(self, candidate)
+
+    monkeypatch.setattr(
+        MultilingualDocument, "_verify_output", delete_space_then_verify
+    )
+    with pytest.raises(ValidationError) as error:
+        MarkdownToDocxConverter().convert(source, output)
+    assert output.read_bytes() == b"original"
+    structural = [
+        message
+        for message in error.value.validation_errors
+        if "paragraph 0" in message and "expected" in message and "actual" in message
+    ]
+    assert structural
+    assert all("..." in message and len(message) < 1200 for message in structural)
 
 
 @pytest.mark.parametrize("corrupt_second", [False, True], ids=["intact", "corrupt"])
