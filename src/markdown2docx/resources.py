@@ -4,11 +4,14 @@ import errno
 import os
 import stat
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 from .exceptions import ConversionError
+
+if TYPE_CHECKING:
+    from .output import PinnedDirectory
 
 
 def _outside_resource_directory() -> ConversionError:
@@ -167,7 +170,12 @@ def validate_restricted_arguments(arguments: Sequence[str]) -> None:
 
 
 def stage_local_resources(
-    ast: Any, root: Path, destination: Path, *, max_bytes: int
+    ast: Any,
+    root: Path,
+    destination: Path,
+    *,
+    max_bytes: int,
+    workspace: PinnedDirectory | None = None,
 ) -> None:
     """Copy already-validated images into a private conversion workspace."""
     import uuid
@@ -176,7 +184,9 @@ def stage_local_resources(
 
     if isinstance(ast, list):
         for item in ast:
-            stage_local_resources(item, root, destination, max_bytes=max_bytes)
+            stage_local_resources(
+                item, root, destination, max_bytes=max_bytes, workspace=workspace
+            )
     elif isinstance(ast, dict):
         if ast.get("t") == "Image":
             source = Path(ast["c"][2][0])
@@ -223,7 +233,14 @@ def stage_local_resources(
                         os.close(posix_descriptor)
                     if parent is not None:
                         os.close(parent)
-            with original, path.open("xb") as target:
+            if workspace is None:
+                target_context = path.open("xb")
+            else:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if os.name != "nt":
+                    flags |= os.O_NOFOLLOW
+                target_context = os.fdopen(workspace.open_file(path.name, flags), "wb")
+            with original, target_context as target:
                 details = os.fstat(original.fileno())
                 if not stat.S_ISREG(details.st_mode) or details.st_size > max_bytes:
                     raise ConversionError(
@@ -237,4 +254,6 @@ def stage_local_resources(
                     target.write(chunk)
             ast["c"][2][0] = str(path)
         for value in ast.values():
-            stage_local_resources(value, root, destination, max_bytes=max_bytes)
+            stage_local_resources(
+                value, root, destination, max_bytes=max_bytes, workspace=workspace
+            )
