@@ -482,6 +482,119 @@ def test_release_tag_validation_is_unconditional_and_bound_to_dispatch(
 
 
 @pytest.mark.parametrize(
+    ("environment_variable", "relative_path"),
+    [
+        ("ProgramW6432", Path("Git") / "bin" / "bash.exe"),
+        ("ProgramFiles", Path("Git") / "bin" / "bash.exe"),
+        ("ProgramFiles(x86)", Path("Git") / "bin" / "bash.exe"),
+        ("LOCALAPPDATA", Path("Programs") / "Git" / "bin" / "bash.exe"),
+    ],
+)
+def test_find_bash_prefers_windows_git_installations(
+    tmp_path, monkeypatch, environment_variable, relative_path
+):
+    install_root = tmp_path / "install"
+    git_bash = install_root / relative_path
+    git_bash.parent.mkdir(parents=True)
+    git_bash.touch()
+    path_bash = tmp_path / "path" / "bash.exe"
+    path_bash.parent.mkdir()
+    path_bash.touch()
+    for variable in (
+        "ProgramW6432",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv(environment_variable, str(install_root))
+    monkeypatch.setattr("shutil.which", lambda _name: str(path_bash))
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert find_bash(windows=True) == str(git_bash)
+    assert commands == [[str(git_bash), "-e", "-c", "exit 0"]]
+
+
+def test_find_bash_rejects_failed_git_bash_before_using_path(tmp_path, monkeypatch):
+    install_root = tmp_path / "Program Files"
+    git_bash = install_root / "Git" / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.touch()
+    path_bash = tmp_path / "path" / "bash.exe"
+    path_bash.parent.mkdir()
+    path_bash.touch()
+    for variable in (
+        "ProgramW6432",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("ProgramFiles", str(install_root))
+    monkeypatch.setattr("shutil.which", lambda _name: str(path_bash))
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        returncode = 1 if command[0] == str(git_bash) else 0
+        return subprocess.CompletedProcess(command, returncode)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert find_bash(windows=True) == str(path_bash)
+    assert commands == [
+        [str(git_bash), "-e", "-c", "exit 0"],
+        [str(path_bash), "-e", "-c", "exit 0"],
+    ]
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "oserror", "timeout"])
+def test_find_bash_returns_none_without_a_working_executable(
+    tmp_path, monkeypatch, failure
+):
+    path_bash = tmp_path / "bash.exe"
+    path_bash.touch()
+    for variable in (
+        "ProgramW6432",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr("shutil.which", lambda _name: str(path_bash))
+
+    def fake_run(command, **kwargs):
+        if failure == "oserror":
+            raise OSError("cannot execute")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, 5)
+        return subprocess.CompletedProcess(command, 1, stderr="WSL wrapper failed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert find_bash(windows=True) is None
+
+
+def test_find_bash_uses_path_on_posix(tmp_path, monkeypatch):
+    path_bash = tmp_path / "bash"
+    path_bash.touch()
+    monkeypatch.setattr("shutil.which", lambda _name: str(path_bash))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0),
+    )
+
+    assert find_bash(windows=False) == str(path_bash)
+
+
+@pytest.mark.parametrize(
     ("release_ref", "run_ref", "run_ref_type"),
     [
         ("1.2.3", "1.2.3", "tag"),

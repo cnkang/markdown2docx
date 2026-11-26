@@ -1361,6 +1361,9 @@ def test_distribution_directory_requires_exactly_one_of_each(validator, tmp_path
         validator.validate_distribution_directory(tmp_path, VERSION)
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX process sessions are not supported on Windows"
+)
 def test_run_starts_a_new_posix_process_session(validator, tmp_path, monkeypatch):
     captured = {}
 
