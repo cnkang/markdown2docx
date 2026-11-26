@@ -17,7 +17,7 @@ import markdown2docx
 from markdown2docx import MarkdownToDocxConverter
 from markdown2docx.cli import handle_conversion
 from markdown2docx.config import MarkdownToDocxConfig
-from markdown2docx.exceptions import ConversionError
+from markdown2docx.exceptions import ConfigurationError, ConversionError
 from markdown2docx.resources import stage_local_resources, validate_resources
 
 
@@ -139,9 +139,9 @@ def test_untrusted_entry_rejects_unsafe_content_before_processing(
         getattr(converter, entry)(
             source,
             output,
-            restricted=False,
-            resources_offline=False,
-            offline=False,
+            restricted=None,
+            resources_offline=None,
+            offline=None,
         )
 
     fonts.assert_not_called()
@@ -242,6 +242,134 @@ def test_symlink_escape_does_not_touch_external_canary(tmp_path):
     assert any(path == "escape" and flags & os.O_NOFOLLOW for path, flags in accesses)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow staging")
+def test_posix_staging_maps_deleted_resource_to_conversion_error(tmp_path):
+    document = tmp_path / "document"
+    document.mkdir()
+    image = document / "image.png"
+    image.write_bytes(PIXEL_PNG)
+    ast = image_ast("image.png")
+    validate_resources(ast, document, offline=False, restricted=True)
+    image.unlink()
+
+    with pytest.raises(ConversionError, match="does not exist"):
+        stage_local_resources(ast, document, tmp_path / "staged", max_bytes=1024)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow staging")
+def test_posix_staging_rejects_resource_replaced_with_symlink(tmp_path):
+    document = tmp_path / "document"
+    document.mkdir()
+    image = document / "image.png"
+    image.write_bytes(PIXEL_PNG)
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"external canary")
+    ast = image_ast("image.png")
+    validate_resources(ast, document, offline=False, restricted=True)
+    image.unlink()
+    image.symlink_to(outside)
+
+    with pytest.raises(ConversionError, match="symbolic link|reparse"):
+        stage_local_resources(ast, document, tmp_path / "staged", max_bytes=1024)
+
+    assert outside.read_bytes() == b"external canary"
+    assert not list((tmp_path / "staged").glob("*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor staging")
+@pytest.mark.parametrize(
+    ("operation", "error", "message"),
+    [
+        ("open", FileNotFoundError("removed"), "does not exist"),
+        ("open", PermissionError("denied"), "Unable to stage"),
+        ("open", OSError(errno.ELOOP, "loop"), "symbolic link"),
+        ("fdopen", PermissionError("denied"), "Unable to stage"),
+    ],
+)
+def test_posix_staging_maps_open_and_fdopen_errors(tmp_path, operation, error, message):
+    document = tmp_path / "document"
+    document.mkdir()
+    image = document / "image.png"
+    image.write_bytes(PIXEL_PNG)
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    parent = os.open(document, os.O_RDONLY | os.O_DIRECTORY)
+    target = (
+        "markdown2docx.resources.os.open"
+        if operation == "open"
+        else "markdown2docx.resources.os.fdopen"
+    )
+    try:
+        with (
+            patch("markdown2docx.output._open_parent", return_value=parent),
+            patch(target, side_effect=error),
+            pytest.raises(ConversionError, match=message),
+        ):
+            stage_local_resources(
+                image_ast(str(image)), document, staged, max_bytes=1024
+            )
+    finally:
+        try:
+            os.close(parent)
+        except OSError:
+            pass
+
+
+def test_cli_staging_race_is_conversion_failed_not_input_not_found(tmp_path, capsys):
+    document = tmp_path / "document"
+    document.mkdir()
+    image = document / "image.png"
+    image.write_bytes(PIXEL_PNG)
+    ast = image_ast("image.png")
+    validate_resources(ast, document, offline=False, restricted=True)
+
+    def fail_during_staging(*args, **kwargs):
+        image.unlink()
+        stage_local_resources(ast, document, tmp_path / "staged", max_bytes=1024)
+
+    with patch("markdown2docx.cli.MarkdownToDocxConverter") as converter_class:
+        converter_class.return_value.convert_untrusted_with_report.side_effect = (
+            fail_during_staging
+        )
+        result = handle_conversion(
+            str(document / "input.md"),
+            str(document / "output.docx"),
+            None,
+            None,
+            None,
+            None,
+            MarkdownToDocxConfig(),
+            json_output=True,
+            untrusted=True,
+        )
+
+    assert result == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["code"] == "CONVERSION_FAILED"
+    assert payload["error"]["code"] != "INPUT_NOT_FOUND"
+    assert not (document / "output.docx").exists()
+
+
+@pytest.mark.parametrize("location", ["", "."])
+def test_document_root_image_is_rejected_as_non_file(tmp_path, location):
+    with pytest.raises(ConversionError, match="regular file"):
+        validate_resources(
+            image_ast(location), tmp_path, offline=False, restricted=True
+        )
+
+
+def test_windows_document_root_is_rejected_before_open(tmp_path, monkeypatch):
+    from markdown2docx.resources import _validate_restricted_image
+
+    with (
+        patch("markdown2docx.resources.os.name", "nt"),
+        patch("markdown2docx.output.open_windows_resource") as opener,
+        pytest.raises(ConversionError, match="regular file"),
+    ):
+        _validate_restricted_image(tmp_path, tmp_path)
+    opener.assert_not_called()
+
+
 def test_posix_resource_validation_pins_document_root_once(tmp_path, monkeypatch):
     import markdown2docx.output as output_module
 
@@ -274,6 +402,7 @@ def test_windows_stages_readable_local_image(tmp_path):
     image = document / "image.png"
     image.write_bytes(PIXEL_PNG)
     staged = tmp_path / "staged"
+    staged.mkdir()
     ast = image_ast("image.png")
 
     stage_local_resources(ast, document, staged, max_bytes=1024)
@@ -348,6 +477,21 @@ def test_windows_resource_links_cannot_escape_document(tmp_path, entry, kind):
             link.unlink()
 
 
+def test_windows_resource_constants_are_named():
+    from markdown2docx import output
+
+    assert output.FILE_READ_ATTRIBUTES == 0x80
+    assert output.GENERIC_READ == 0x80000000
+    assert output.FILE_SHARE_READ == 0x1
+    assert output.FILE_SHARE_WRITE == 0x2
+    assert output.OPEN_EXISTING == 3
+    assert output.FILE_FLAG_OPEN_REPARSE_POINT == 0x00200000
+    assert output.FILE_FLAG_BACKUP_SEMANTICS == 0x02000000
+    assert output.FILE_ATTRIBUTE_REPARSE_POINT == 0x400
+    assert output.FILE_ATTRIBUTE_DIRECTORY == 0x10
+    assert output.FILE_ATTRIBUTE_NORMAL == 0x80
+
+
 def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
     """Run the Windows API contract on every host with a minimal ctypes double."""
     import ctypes
@@ -356,6 +500,7 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
     from markdown2docx import output
 
     handles = list(range(100, 140))
+    kernels = []
     handle_index = 0
     opened: list[str] = []
     access_modes: list[int] = []
@@ -367,6 +512,8 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
 
     class WinDLL:
         def __init__(self, *args, **kwargs):
+            kernels.append(self)
+
             def create_file(path, access, *args):
                 nonlocal handle_index
                 handle = handles[handle_index]
@@ -387,7 +534,7 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
                 if reparse_kind == "reparse":
                     target.attributes |= 0x400
                 if reparse_kind == "file" and opened[-1].endswith("resource"):
-                    target.attributes = 0x20
+                    target.attributes = 0x80
                 return True
 
             self.GetFileInformationByHandleEx = Mock(side_effect=information)
@@ -437,7 +584,25 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
         assert descriptor >= 1100
         assert access_modes[:-1] == [0x80] * (len(access_modes) - 1)
         assert access_modes[-1] == 0x80000000
-    assert modules["msvcrt"].open_osfhandle.called
+        kernel = kernels[-1]
+        calls = kernel.CreateFileW.call_args_list
+        assert [call.args[2] for call in calls] == [0x3] * len(calls)
+        assert [call.args[4] for call in calls] == [3] * len(calls)
+        assert all(call.args[5] & 0x00200000 for call in calls)
+        assert all(call.args[5] & 0x02000000 for call in calls[:-1])
+        assert not calls[-1].args[5] & 0x02000000
+        assert kernel.CloseHandle.call_count == len(calls) - 1
+        assert modules["msvcrt"].open_osfhandle.called
+
+        modules["msvcrt"].open_osfhandle.side_effect = OSError("fd conversion failed")
+        handle_index = 0
+        opened.clear()
+        access_modes.clear()
+        reparse_kind = "file"
+        with pytest.raises(OSError, match="fd conversion failed"):
+            output.open_windows_resource(tmp_path / "resource", directory=False)
+        failed_kernel = kernels[-1]
+        assert failed_kernel.CloseHandle.call_count == len(opened)
 
 
 @pytest.mark.parametrize(
@@ -472,9 +637,9 @@ def test_untrusted_entry_rejects_unsafe_arguments_before_processing(
             source,
             output,
             extra_args=extra_args,
-            restricted=False,
-            resources_offline=False,
-            offline=False,
+            restricted=None,
+            resources_offline=None,
+            offline=None,
         )
 
     parser.assert_not_called()
@@ -482,6 +647,34 @@ def test_untrusted_entry_rejects_unsafe_arguments_before_processing(
     templates.assert_not_called()
     writer.assert_not_called()
     assert not output.exists()
+
+
+@pytest.mark.parametrize("option", ["offline", "resources_offline", "restricted"])
+def test_untrusted_report_rejects_explicit_false_policy(tmp_path, option):
+    converter = untrusted_converter(tmp_path)
+    source = tmp_path / "input.md"
+    source.write_text("Safe text", encoding="utf-8")
+
+    with (
+        patch.object(converter, "convert_with_report") as pipeline,
+        pytest.raises(ConfigurationError, match=option),
+    ):
+        converter.convert_untrusted_with_report(source, **{option: False})
+    pipeline.assert_not_called()
+
+
+@pytest.mark.parametrize("option", ["offline", "resources_offline", "restricted"])
+@pytest.mark.parametrize("value", [None, True])
+def test_untrusted_report_accepts_none_or_true_policy(tmp_path, option, value):
+    converter = untrusted_converter(tmp_path)
+    source = tmp_path / "input.md"
+    source.write_text("Safe text", encoding="utf-8")
+
+    with patch.object(converter, "convert_with_report") as pipeline:
+        pipeline.return_value = Mock()
+        converter.convert_untrusted_with_report(source, **{option: value})
+
+    assert pipeline.call_args.kwargs[option] is True
 
 
 @pytest.mark.parametrize(
