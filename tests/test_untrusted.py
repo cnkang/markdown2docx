@@ -1,6 +1,7 @@
 """Default-safe conversion for Markdown whose caller is not trusted."""
 
 import base64
+import errno
 import json
 import os
 import subprocess
@@ -214,6 +215,7 @@ def test_symlink_escape_does_not_touch_external_canary(tmp_path):
     accesses = []
     original_open = os.open
     root_descriptor = os.open(document, os.O_RDONLY | os.O_DIRECTORY)
+    borrowed_descriptor = os.dup(root_descriptor)
 
     def record_open(path, flags, *args, **kwargs):
         accesses.append((os.fspath(path), flags))
@@ -221,16 +223,19 @@ def test_symlink_escape_does_not_touch_external_canary(tmp_path):
 
     try:
         with (
-            patch("markdown2docx.output._open_parent", return_value=root_descriptor),
+            patch(
+                "markdown2docx.output._open_parent",
+                return_value=borrowed_descriptor,
+            ),
             patch("os.open", side_effect=record_open),
             pytest.raises(ConversionError, match="symbolic link"),
         ):
             validate_resources(ast, document, offline=False, restricted=True)
+        with pytest.raises(OSError) as error:
+            os.fstat(borrowed_descriptor)
+        assert error.value.errno == errno.EBADF
     finally:
-        try:
-            os.close(root_descriptor)
-        except OSError:
-            pass
+        os.close(root_descriptor)
 
     assert canary.read_bytes() == b"external canary"
     assert not any("canary.png" in path for path, _ in accesses)
@@ -260,6 +265,22 @@ def test_posix_resource_validation_pins_document_root_once(tmp_path, monkeypatch
         os.close(root_descriptor)
 
     assert calls == [document]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows secure handle contract")
+def test_windows_stages_readable_local_image(tmp_path):
+    document = tmp_path / "document"
+    document.mkdir()
+    image = document / "image.png"
+    image.write_bytes(PIXEL_PNG)
+    staged = tmp_path / "staged"
+    ast = image_ast("image.png")
+
+    stage_local_resources(ast, document, staged, max_bytes=1024)
+
+    staged_image = Path(ast["c"][2][0])
+    assert staged_image.parent == staged
+    assert staged_image.read_bytes() == PIXEL_PNG
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows secure handle contract")
@@ -337,6 +358,7 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
     handles = list(range(100, 140))
     handle_index = 0
     opened: list[str] = []
+    access_modes: list[int] = []
 
     class Structure(ctypes.Structure):
         _fields_ = [("attributes", ctypes.c_uint32), ("tag", ctypes.c_uint32)]
@@ -345,11 +367,12 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
 
     class WinDLL:
         def __init__(self, *args, **kwargs):
-            def create_file(path, *args):
+            def create_file(path, access, *args):
                 nonlocal handle_index
                 handle = handles[handle_index]
                 handle_index += 1
                 opened.append(path)
+                access_modes.append(access)
                 return handle
 
             self.CreateFileW = Mock(side_effect=create_file)
@@ -393,22 +416,27 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
         stack.enter_context(patch.object(output.os, "name", "nt"))
         handle_index = 0
         opened.clear()
+        access_modes.clear()
         reparse_kind = "reparse"
         with pytest.raises(OSError, match="reparse point"):
             output.open_windows_resource(tmp_path / "resource", directory=True)
         handle_index = 0
         opened.clear()
+        access_modes.clear()
         reparse_kind = "reparse"
         with pytest.raises(OSError, match="reparse point"):
             output.open_windows_resource(tmp_path / "resource", directory=False)
         monkeypatch.setattr(output.os, "O_BINARY", 0x8000, raising=False)
         handle_index = 0
         opened.clear()
+        access_modes.clear()
         reparse_kind = "file"
         descriptor = output.open_windows_resource(
             tmp_path / "resource", directory=False
         )
         assert descriptor >= 1100
+        assert access_modes[:-1] == [0x80] * (len(access_modes) - 1)
+        assert access_modes[-1] == 0x80000000
     assert modules["msvcrt"].open_osfhandle.called
 
 
