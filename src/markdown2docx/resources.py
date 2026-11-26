@@ -1,11 +1,95 @@
 """Explicit boundaries for documents with external resources or filters."""
 
+import os
+import stat
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 from .exceptions import ConversionError
+
+
+def _outside_resource_directory() -> ConversionError:
+    return ConversionError("", "Image is outside the document resource directory")
+
+
+def _lexical_paths(root: Path, path: Path) -> tuple[Path, Path]:
+    """Normalize paths without consulting the filesystem or resolving links."""
+    normalized_root = Path(os.path.abspath(os.path.normpath(os.fspath(root))))
+    candidate = Path(os.path.abspath(os.path.normpath(os.fspath(path))))
+    try:
+        inside = os.path.commonpath(
+            [
+                os.path.normcase(os.fspath(normalized_root)),
+                os.path.normcase(os.fspath(candidate)),
+            ]
+        ) == os.path.normcase(os.fspath(normalized_root))
+    except ValueError:
+        inside = False
+    if not inside:
+        raise _outside_resource_directory()
+    return normalized_root, candidate
+
+
+def _open_restricted_parent(root: Path, candidate: Path) -> tuple[int, str]:
+    """Open a POSIX candidate's parent component by component without following links."""
+    if root.anchor != candidate.anchor:
+        raise _outside_resource_directory()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    components = candidate.relative_to(root).parts
+    descriptor: int | None = None
+    component = ""
+    try:
+        descriptor = os.open(root.anchor, flags)
+        for component in root.parts[1:] + components[:-1]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        if descriptor is None:
+            raise ConversionError("", "Unable to validate image resource safely")
+        return descriptor, components[-1]
+    except OSError as exc:
+        entry = None
+        if descriptor is not None and component:
+            try:
+                entry = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            except OSError:
+                pass
+        if entry is not None and stat.S_ISLNK(entry.st_mode):
+            if descriptor is not None:
+                os.close(descriptor)
+            raise ConversionError(
+                "", "Image resource contains a symbolic link"
+            ) from exc
+        if descriptor is not None:
+            os.close(descriptor)
+        if isinstance(exc, FileNotFoundError):
+            raise ConversionError("", "Image resource does not exist") from exc
+        if isinstance(exc, NotADirectoryError):
+            raise _outside_resource_directory() from exc
+        raise ConversionError("", "Unable to validate image resource safely") from exc
+
+
+def _validate_restricted_image(root: Path, path: Path) -> str:
+    normalized_root, candidate = _lexical_paths(root, path)
+    if os.name == "nt":
+        # Windows keeps its trusted-directory semantics after the lexical boundary check.
+        return str(candidate)
+    if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")):
+        raise ConversionError("", "Secure resource validation is unavailable")
+    descriptor, name = _open_restricted_parent(normalized_root, candidate)
+    try:
+        details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISLNK(details.st_mode):
+            raise ConversionError("", "Image resource is a symbolic link")
+        if not stat.S_ISREG(details.st_mode):
+            raise ConversionError("", "Image resource must be a regular file")
+    except FileNotFoundError as exc:
+        raise ConversionError("", "Image resource does not exist") from exc
+    finally:
+        os.close(descriptor)
+    return str(candidate)
 
 
 def validate_resources(
@@ -36,17 +120,7 @@ def validate_resources(
                     else Path(unquote(parsed.path))
                 )
                 path = path if path.is_absolute() else root / path
-                resolved_root = root.resolve()
-                if not path.resolve(strict=False).is_relative_to(resolved_root):
-                    raise ConversionError(
-                        "", "Image is outside the document resource directory"
-                    )
-                resolved = path.resolve(strict=True)
-                if not resolved.is_relative_to(resolved_root):
-                    raise ConversionError(
-                        "", "Image is outside the document resource directory"
-                    )
-                ast["c"][2][0] = str(resolved)
+                ast["c"][2][0] = _validate_restricted_image(root, path)
         for value in ast.values():
             validate_resources(value, root, offline=offline, restricted=restricted)
 
@@ -75,8 +149,6 @@ def stage_local_resources(
     ast: Any, root: Path, destination: Path, *, max_bytes: int
 ) -> None:
     """Copy already-validated images into a private conversion workspace."""
-    import os
-    import stat
     import uuid
 
     from .output import _open_parent
