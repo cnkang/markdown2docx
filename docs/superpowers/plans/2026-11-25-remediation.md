@@ -54,7 +54,7 @@
 **Files:** `skills/markdown-to-docx/scripts/run.py`, `skills/markdown-to-docx/SKILL.md`, `tests/test_skill.py`, `.github/workflows/test.yml`
 
 - [x] Add failing launcher tests for immutable revision, offline flag forwarding, argument preservation, exit codes, and documentation boundaries.
-- [x] Update pin to reviewed `bac6731231a38f9873fd1dfeba02ce1c8a448a76`; refresh to the final reviewed remediation commit before merge.
+- [x] Update pin to persistent reviewed `bac6731231a38f9873fd1dfeba02ce1c8a448a76`; refresh after merge to avoid PR-self/squash references.
 - [x] Add full-history checkout and real CI smoke for version/doctor/minimal DOCX conversion with `pipefail`.
 - [x] Run focused/full tests and real launcher smoke; final CI fix `0a4c26e`.
 
