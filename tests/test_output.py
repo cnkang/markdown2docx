@@ -35,6 +35,19 @@ windows_only = pytest.mark.skipif(
 )
 
 
+def test_mkdir_if_missing_tolerates_concurrent_creation(tmp_path, monkeypatch):
+    target = tmp_path / "racing-preview"
+    original_mkdir = Path.mkdir
+
+    def racing_mkdir(self, *args, **kwargs):
+        original_mkdir(self, *args, **kwargs)
+        raise FileExistsError(str(self))
+
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+    output_module._mkdir_if_missing(target)
+    assert target.is_dir()
+
+
 class WindowsOSProxy:
     """Exercise Windows branches without changing pathlib's host platform."""
 

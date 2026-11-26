@@ -682,14 +682,21 @@ def _open_windows_directory_handle(path: Path) -> int:
     return handle
 
 
+def _mkdir_if_missing(path: Path) -> None:
+    """Create a directory idempotently under concurrent callers."""
+    try:
+        path.mkdir()
+    except FileExistsError:
+        pass
+
+
 @contextlib.contextmanager
 def _windows_directory_pin(path: Path) -> Iterator[None]:
     """Retain every Windows ancestor so pathname-based child tools stay pinned."""
     handles: list[int] = []
     try:
         for ancestor in reversed([path.absolute(), *path.absolute().parents]):
-            if not ancestor.exists():
-                ancestor.mkdir()
+            _mkdir_if_missing(ancestor)
             handles.append(_open_windows_directory_handle(ancestor))
         yield
     finally:
