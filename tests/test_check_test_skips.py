@@ -77,11 +77,25 @@ def test_windows_rejects_unprefixed_output_skip(load_skip_checker, tmp_path):
     assert "posix_only:" in violations[0]
 
 
-def test_windows_rejects_skip_outside_output_tests(load_skip_checker, tmp_path):
+def test_windows_accepts_posix_only_skip_outside_output_tests(
+    load_skip_checker, tmp_path
+):
     skip_checker = load_skip_checker()
     report = write_complete_report(
         tmp_path,
         [("tests.test_multilingual", "test_optional_feature", "posix_only: unused")],
+    )
+
+    assert skip_checker.find_unexpected_skips(report, windows=True) == []
+
+
+def test_windows_rejects_unprefixed_skip_outside_output_tests(
+    load_skip_checker, tmp_path
+):
+    skip_checker = load_skip_checker()
+    report = write_complete_report(
+        tmp_path,
+        [("tests.test_multilingual", "test_optional_feature", "feature unavailable")],
     )
 
     violations = skip_checker.find_unexpected_skips(report, windows=True)

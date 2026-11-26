@@ -846,7 +846,9 @@ def test_sdist_snapshot_rechecks_fstat_after_copy(validator, tmp_path, monkeypat
         validator.extract_sdist(sdist, tmp_path / "extracted")
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX private-directory permission bits")
+@pytest.mark.skipif(
+    os.name == "nt", reason="posix_only: POSIX private-directory permission bits"
+)
 def test_sdist_snapshot_uses_private_temporary_root(validator, tmp_path, monkeypatch):
     real_temporary_directory = tempfile.TemporaryDirectory
     modes = []
@@ -1362,7 +1364,8 @@ def test_distribution_directory_requires_exactly_one_of_each(validator, tmp_path
 
 
 @pytest.mark.skipif(
-    os.name == "nt", reason="POSIX process sessions are not supported on Windows"
+    os.name == "nt",
+    reason="posix_only: POSIX process sessions are not supported on Windows",
 )
 def test_run_starts_a_new_posix_process_session(validator, tmp_path, monkeypatch):
     captured = {}
@@ -1467,7 +1470,9 @@ def test_run_cleans_up_process_tree_on_cancellation(validator, tmp_path, monkeyp
     assert len(cleaned) == 1
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group descendant check")
+@pytest.mark.skipif(
+    os.name == "nt", reason="posix_only: POSIX process-group descendant check"
+)
 def test_run_timeout_kills_real_descendant_processes(validator, tmp_path):
     marker = tmp_path / "descendant-survived"
     child_code = (

@@ -74,16 +74,16 @@ def find_unexpected_skips(junit_xml: Path, *, windows: bool) -> list[str]:
                 violations.append(
                     f"{identity}: required Windows output case was skipped: {reason}"
                 )
-            elif is_output_test:
-                if not reason.startswith(POSIX_ONLY_PREFIX):
+            elif not reason.startswith(POSIX_ONLY_PREFIX):
+                if is_output_test:
                     violations.append(
                         f"{identity}: skip reason must start with {POSIX_ONLY_PREFIX!r}; "
                         f"got {reason!r}"
                     )
-            else:
-                violations.append(
-                    f"{identity}: unexpected skip outside {OUTPUT_TEST_FILE}: {reason}"
-                )
+                else:
+                    violations.append(
+                        f"{identity}: unexpected skip outside {OUTPUT_TEST_FILE}: {reason}"
+                    )
 
     for name in REQUIRED_WINDOWS_OUTPUT_CASES:
         if name not in seen_required:
