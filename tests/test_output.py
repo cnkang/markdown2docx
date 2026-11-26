@@ -3,6 +3,7 @@
 import ntpath
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ import pytest
 from docx import Document
 from docx.document import Document as DocumentType
 
+import markdown2docx.converter as converter_module
 from markdown2docx.config import MarkdownToDocxConfig
 from markdown2docx.converter import MarkdownToDocxConverter
 from markdown2docx.exceptions import ConversionError, TemplateError, ValidationError
@@ -258,6 +260,109 @@ def test_writer_ignores_untrusted_tmpdir(monkeypatch, tmp_path):
         assert temporary not in stage.parents
         stage.write_bytes(b"document")
     assert output.read_bytes() == b"document"
+
+
+@posix_only
+def test_conversion_workspace_ignores_hostile_temporary_configuration(
+    monkeypatch, tmp_path
+):
+    """AST, reference and resources must share a root outside attacker TMPDIR."""
+    hostile = tmp_path / "hostile-temp"
+    hostile.mkdir(mode=0o777)
+    monkeypatch.setenv("TMPDIR", str(hostile))
+    monkeypatch.setattr("tempfile.tempdir", str(hostile))
+    source = tmp_path / "input.md"
+    source.write_text("# Document", encoding="utf-8")
+    output = tmp_path / "report.docx"
+    observed = {}
+    original_stage = converter_module.stage_local_resources
+    original_reference = converter_module.DocxTemplateManager.create_reference
+    original_writer = converter_module.write_docx
+
+    def stage(ast, root, destination, **kwargs):
+        observed["resources"] = Path(destination)
+        return original_stage(ast, root, destination, **kwargs)
+
+    def reference(path, *args, **kwargs):
+        observed["reference"] = Path(path).parent
+        return original_reference(path, *args, **kwargs)
+
+    def write(*args, outputfile, **kwargs):
+        observed["ast_file"] = Path(args[0])
+        observed["ast"] = observed["ast_file"].parent
+        return original_writer(*args, outputfile=outputfile, **kwargs)
+
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    monkeypatch.setattr(converter_module, "stage_local_resources", stage)
+    monkeypatch.setattr(
+        converter_module.DocxTemplateManager, "create_reference", reference
+    )
+    monkeypatch.setattr(converter_module, "write_docx", write)
+
+    MarkdownToDocxConverter().convert_untrusted(source, output)
+
+    workspace = observed["resources"]
+    assert workspace == observed["reference"] == observed["ast"]
+    assert observed["ast_file"].parent == workspace
+    assert hostile not in workspace.parents
+    assert not list(hostile.iterdir())
+
+
+@posix_only
+def test_conversion_workspace_replacement_cannot_capture_ast_resources_or_reference(
+    monkeypatch, tmp_path
+):
+    """A workspace renamed immediately after creation cannot redirect later writes."""
+    temporary = tmp_path / "temporary"
+    temporary.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(temporary))
+    source = tmp_path / "input.md"
+    source.write_text("# Document\n\n![pixel](image.png)", encoding="utf-8")
+    (tmp_path / "image.png").write_bytes(b"image")
+    output = tmp_path / "report.docx"
+    attack = {"directory": None, "moved": None}
+    original_mkdir = os.mkdir
+
+    def descriptor_path(descriptor):
+        if sys.platform == "darwin":
+            import fcntl
+
+            path = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytearray(1024))
+            return Path(os.fsdecode(path).rstrip("\0"))
+        return Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+
+    def rename_after_create(path, mode=0o777, *, dir_fd=None):
+        result = original_mkdir(path, mode, dir_fd=dir_fd)
+        name = Path(os.fspath(path)).name
+        if name.startswith("md2docx-convert-") and attack["directory"] is None:
+            parent = (
+                descriptor_path(dir_fd) if dir_fd is not None else Path(path).parent
+            )
+            root = parent / name
+            moved = parent / f"{name}-moved"
+            redirected = parent / f"{name}-attack"
+            attack.update(directory=redirected, moved=moved)
+            redirected.mkdir()
+            root.rename(moved)
+            root.symlink_to(redirected, target_is_directory=True)
+        return result
+
+    def stop_writer(*_args, **_kwargs):
+        raise RuntimeError("stop after workspace preparation")
+
+    supported = set(os.supports_dir_fd)
+    supported.add(rename_after_create)
+    monkeypatch.setattr(os, "supports_dir_fd", supported)
+    monkeypatch.setattr("markdown2docx.output.os.mkdir", rename_after_create)
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    monkeypatch.setattr(converter_module, "write_docx", stop_writer)
+
+    with pytest.raises((ConversionError, OSError)):
+        MarkdownToDocxConverter().convert_untrusted(source, output)
+
+    assert attack["directory"] is not None
+    assert not list(attack["directory"].iterdir())
+    assert not output.exists()
 
 
 @windows_only
