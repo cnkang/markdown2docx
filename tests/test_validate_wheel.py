@@ -794,6 +794,58 @@ def test_sdist_extraction_preserves_the_single_project_root(validator, tmp_path)
     assert (root / f"src/{PROJECT_NAME}/report_schema.json").is_file()
 
 
+def test_sdist_physical_size_limit_is_centralized_at_64_mib(validator):
+    assert validator.MAX_SDIST_BYTES == 64 * 1024 * 1024
+
+
+def test_sdist_oversized_file_fails_before_snapshot_open(
+    validator, tmp_path, monkeypatch
+):
+    sdist = write_sdist(tmp_path)
+    with sdist.open("wb") as stream:
+        stream.truncate(64 * 1024 * 1024 + 1)
+
+    def forbidden_open(*args, **kwargs):
+        raise AssertionError("Oversized sdist must fail before any file open")
+
+    monkeypatch.setattr(validator.Path, "open", forbidden_open)
+
+    with pytest.raises(validator.DistributionError, match="physical|size|limit"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_snapshot_accepts_exact_physical_size_limit(
+    validator, tmp_path, monkeypatch
+):
+    sdist = write_sdist(tmp_path)
+    monkeypatch.setattr(validator, "MAX_SDIST_BYTES", sdist.stat().st_size)
+
+    with validator._sdist_snapshot(sdist) as (snapshot, digest):
+        assert snapshot.stat().st_size == sdist.stat().st_size
+        assert len(digest) == 64
+
+
+def test_sdist_snapshot_rechecks_fstat_after_copy(validator, tmp_path, monkeypatch):
+    sdist = write_sdist(tmp_path)
+    monkeypatch.setattr(validator, "MAX_SDIST_BYTES", 1024 * 1024)
+    real_fstat = os.fstat
+    calls = []
+
+    class OversizedStat:
+        st_size = validator.MAX_SDIST_BYTES + 1
+
+    def fake_fstat(file_descriptor):
+        calls.append(file_descriptor)
+        if len(calls) == 2:
+            return OversizedStat()
+        return real_fstat(file_descriptor)
+
+    monkeypatch.setattr(validator.os, "fstat", fake_fstat)
+
+    with pytest.raises(validator.DistributionError, match="physical|size|limit"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX private-directory permission bits")
 def test_sdist_snapshot_uses_private_temporary_root(validator, tmp_path, monkeypatch):
     real_temporary_directory = tempfile.TemporaryDirectory
