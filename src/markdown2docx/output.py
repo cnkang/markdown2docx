@@ -684,6 +684,8 @@ def _open_windows_directory_handle(path: Path) -> int:
 
 def _mkdir_if_missing(path: Path) -> None:
     """Create a directory idempotently under concurrent callers."""
+    if path.exists():
+        return
     try:
         path.mkdir()
     except FileExistsError:
