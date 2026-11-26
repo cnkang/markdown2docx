@@ -81,10 +81,10 @@
 
 **Files:** `scripts/validate_wheel.py`, `pyproject.toml`, `.github/workflows/test.yml`, `.github/workflows/release.yml`
 
-- [ ] Add failing script tests for console entry point, version assertion, package location, LICENSE, METADATA, JSON assets, and sdist rebuild.
-- [ ] Implement artifact inventory and sdist install/rebuild smoke.
-- [ ] Pin Hatchling build requirement and record tool versions/hashes.
-- [ ] Run script tests and build/install smoke; commit `build: verify complete distribution artifacts`.
+- [x] Add failing tests for console entry point, version, package location, LICENSE, METADATA, JSON assets, RECORD hashes, archive limits/path aliases, and orchestration.
+- [x] Implement bounded wheel/sdist validation, private snapshots, console script smoke, and sdist rebuild/install on Linux.
+- [x] Pin Hatchling, lock install constraints, clean subprocess trees, and reuse same-SHA release evidence.
+- [x] Run full tests (`706 passed, 8 skipped`) and real build/install/rebuild smoke; final fix `0d117dc`.
 
 ## PR2 — Untrusted input and resource boundaries
 
