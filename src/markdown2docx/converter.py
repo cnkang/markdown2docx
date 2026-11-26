@@ -7,6 +7,7 @@ type safety, and configuration management.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import logging
@@ -15,6 +16,7 @@ import os
 # controlled argv, shell=False
 import subprocess  # nosec B404
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Optional, Sequence, Union
@@ -40,7 +42,11 @@ from .exceptions import (
 )
 from .fonts import FontResolver
 from .multilingual import MultilingualDocument, text_of
-from .output import secure_temporary_directory, staged_docx_output
+from .output import (
+    PinnedDirectory,
+    secure_temporary_directory,
+    staged_docx_output,
+)
 from .report import ConversionReport, render_preview
 from .resources import (
     stage_local_resources,
@@ -52,6 +58,23 @@ from .templates import DocxTemplateManager
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _conversion_workspace(
+    input_path: Path, output_path: Path
+) -> Iterator[PinnedDirectory]:
+    """Normalize every workspace lifecycle OSError at the converter boundary."""
+    try:
+        with secure_temporary_directory(
+            prefix="md2docx-convert-",
+            directory=output_path.parent if os.name == "nt" else None,
+        ) as workspace:
+            yield workspace
+    except OSError as exc:
+        raise ConversionError(
+            str(input_path), f"Unable to manage conversion workspace: {exc}", exc
+        ) from exc
 
 
 class MarkdownToDocxConverter:
@@ -387,10 +410,7 @@ class MarkdownToDocxConverter:
         document.limits = self.config.limits
         annotated = document.annotate(toc=effective_toc)
         timings["annotate_fonts"] = perf_counter() - annotated_start
-        with secure_temporary_directory(
-            prefix="md2docx-convert-",
-            directory=output_path.parent if os.name == "nt" else None,
-        ) as workspace:
+        with _conversion_workspace(input_path, output_path) as workspace:
             root = workspace.path
             if restricted_mode:
                 stage_local_resources(

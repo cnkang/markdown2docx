@@ -58,18 +58,32 @@ def _copy_regular(source: int, target: int) -> None:
     try:
         details = os.fstat(source)
     except BaseException:
-        os.close(source)
+        with contextlib.suppress(OSError):
+            os.close(source)
+        with contextlib.suppress(OSError):
+            os.close(target)
         raise
     if not stat.S_ISREG(details.st_mode):
-        os.close(source)
-        os.close(target)
+        with contextlib.suppress(OSError):
+            os.close(source)
+        with contextlib.suppress(OSError):
+            os.close(target)
         raise OSError("Preview source is not a regular file")
-    original = os.fdopen(source, "rb")
+    try:
+        original = os.fdopen(source, "rb")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(source)
+        with contextlib.suppress(OSError):
+            os.close(target)
+        raise
     try:
         destination = os.fdopen(target, "wb")
     except BaseException:
-        original.close()
-        os.close(target)
+        with contextlib.suppress(OSError):
+            original.close()
+        with contextlib.suppress(OSError):
+            os.close(target)
         raise
     with original, destination:
         shutil.copyfileobj(original, destination)
@@ -92,8 +106,12 @@ def _copy_generation(source: PinnedDirectory, target: PinnedDirectory) -> None:
                 raise
             _copy_regular(source_descriptor, target_descriptor)
         else:
-            target.make_directory(name)
-            target_child = target.open_directory(name)
+            try:
+                target.make_directory(name)
+                target_child = target.open_directory(name)
+            except BaseException:
+                os.close(child)
+                raise
             try:
                 _copy_generation(
                     PinnedDirectory(source.path / name, child),
@@ -109,15 +127,31 @@ def _publish_generation(generation: PinnedDirectory, target: PinnedDirectory) ->
     staging_name = f".preview-publish-{uuid.uuid4().hex}"
     published_name = f"generation-{uuid.uuid4().hex}"
     target.make_directory(staging_name)
-    staging_descriptor = target.open_directory(staging_name)
-    staging = PinnedDirectory(target.path / staging_name, staging_descriptor)
+    try:
+        staging_descriptor = target.open_directory(staging_name)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            target.remove_entry(staging_name)
+        raise
+    try:
+        staging_path = target.current_path() / staging_name
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(staging_descriptor)
+        with contextlib.suppress(OSError):
+            target.remove_entry(staging_name)
+        raise
+    staging = PinnedDirectory(staging_path, staging_descriptor)
     published = False
     staging_closed = False
     try:
         _copy_generation(generation, staging)
         if os.name == "nt":
+            os.close(staging_descriptor)
+            staging_closed = True
             os.replace(staging.path, target.path / published_name)
         else:
+            staging.assert_pinned()
             os.rename(
                 staging_name,
                 published_name,
@@ -126,21 +160,22 @@ def _publish_generation(generation: PinnedDirectory, target: PinnedDirectory) ->
             )
         published = True
     finally:
-        if not published:
-            if os.name == "nt":
+        try:
+            if not published:
+                if os.name == "nt":
+                    if not staging_closed:
+                        os.close(staging_descriptor)
+                        staging_closed = True
+                    with contextlib.suppress(FileNotFoundError):
+                        shutil.rmtree(staging.path)
+                else:
+                    staging.cleanup()
+        finally:
+            if not staging_closed:
                 os.close(staging_descriptor)
-                staging_closed = True
-                shutil.rmtree(staging.path)
-            else:
-                staging.cleanup()
-        if not staging_closed:
-            os.close(staging_descriptor)
-        if os.name == "nt":
-            with contextlib.suppress(FileNotFoundError):
-                staging.path.rmdir()
-        else:
-            with contextlib.suppress(OSError):
-                os.rmdir(staging_name, dir_fd=target.descriptor)
+            if not published:
+                with contextlib.suppress(OSError):
+                    target.remove_entry(staging_name)
     return target.current_path() / published_name
 
 
@@ -180,6 +215,7 @@ def render_preview(
                     text=True,
                     timeout=120,
                 )
+                rendering.assert_pinned()
                 if result.returncode:
                     return {
                         "status": "failed",
@@ -187,20 +223,21 @@ def render_preview(
                     }
                 pdf_name = path.with_suffix(".pdf").name
                 pdf_descriptor = rendering.open_regular(pdf_name)
-                rendering.make_directory("generation")
-                generation_descriptor = rendering.open_directory("generation")
+                pdf_open = True
+                try:
+                    rendering.make_directory("generation")
+                    generation_descriptor = rendering.open_directory("generation")
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        os.close(pdf_descriptor)
+                    raise
                 generation = PinnedDirectory(root / "generation", generation_descriptor)
                 try:
                     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
                     if os.name != "nt":
                         flags |= os.O_NOFOLLOW
-                    try:
-                        destination_descriptor = generation.open_file(
-                            "preview.pdf", flags
-                        )
-                    except BaseException:
-                        os.close(pdf_descriptor)
-                        raise
+                    destination_descriptor = generation.open_file("preview.pdf", flags)
+                    pdf_open = False
                     _copy_regular(pdf_descriptor, destination_descriptor)
                     images: list[str] = []
                     raster = shutil.which("pdftoppm")
@@ -250,7 +287,11 @@ def render_preview(
                         "visual_review": "required",
                     }
                 finally:
-                    os.close(generation_descriptor)
+                    try:
+                        if pdf_open:
+                            os.close(pdf_descriptor)
+                    finally:
+                        os.close(generation_descriptor)
 
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "failed", "reason": str(exc)}

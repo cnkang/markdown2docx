@@ -17,9 +17,11 @@ from typing import Any, cast
 
 FILE_READ_ATTRIBUTES = 0x80
 GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
 FILE_SHARE_READ = 0x1
 FILE_SHARE_WRITE = 0x2
 OPEN_EXISTING = 3
+CREATE_NEW = 1
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -31,6 +33,10 @@ INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 class WindowsFileAttributes(ctypes.Structure):
     _fields_ = [("attributes", ctypes.c_uint32), ("tag", ctypes.c_uint32)]
+
+
+def _identity(details: os.stat_result) -> tuple[int, int]:
+    return details.st_dev, details.st_ino
 
 
 class PinnedDirectory:
@@ -80,13 +86,55 @@ class PinnedDirectory:
             os.mkdir(name, mode=0o700, dir_fd=self.descriptor)
 
     def write_bytes(self, name: str, data: bytes, *, replace: bool = False) -> None:
-        flags = os.O_WRONLY | os.O_CREAT
-        flags |= os.O_TRUNC if replace else os.O_EXCL
-        if os.name != "nt":
+        if os.name == "nt":
+            descriptor = open_windows_writable(self.path / name, replace=replace)
+            try:
+                if replace:
+                    os.ftruncate(descriptor, 0)
+            except BaseException:
+                os.close(descriptor)
+                raise
+        else:
+            flags = os.O_WRONLY | os.O_CREAT
+            flags |= os.O_TRUNC if replace else os.O_EXCL
             flags |= os.O_NOFOLLOW
-        descriptor = self.open_file(name, flags)
-        with os.fdopen(descriptor, "wb") as target:
+            descriptor = self.open_file(name, flags)
+        try:
+            target = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with target:
             target.write(data)
+
+    def remove_entry(self, name: str) -> None:
+        """Remove an empty private directory entry without following a link."""
+        if os.name == "nt":
+            path = self.path / name
+            if path.is_symlink():
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                return
+            try:
+                path.rmdir()
+            except FileNotFoundError:
+                return
+            except NotADirectoryError:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+            return
+        try:
+            os.rmdir(name, dir_fd=self.descriptor)
+        except FileNotFoundError:
+            return
+        except NotADirectoryError:
+            try:
+                details = os.stat(name, dir_fd=self.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if stat.S_ISDIR(details.st_mode):
+                raise
+            os.unlink(name, dir_fd=self.descriptor)
 
     def assert_pinned(self) -> None:
         """Reject a replaced path before invoking a pathname-based child process."""
@@ -99,7 +147,7 @@ class PinnedDirectory:
             raise OSError(
                 f"Temporary workspace path was replaced: {self.path}"
             ) from exc
-        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+        if _identity(current) != _identity(expected):
             raise OSError(f"Temporary workspace path was replaced: {self.path}")
 
     def current_path(self) -> Path:
@@ -111,10 +159,7 @@ class PinnedDirectory:
             current = os.stat(self.path, follow_symlinks=False)
         except OSError:
             current = None
-        if current is not None and (current.st_dev, current.st_ino) == (
-            expected.st_dev,
-            expected.st_ino,
-        ):
+        if current is not None and _identity(current) == _identity(expected):
             return self.path
         if platform.system() == "Darwin":
             import fcntl
@@ -183,7 +228,9 @@ def _windows_api() -> tuple[Any, Any, Any]:
     return windows, kernel, wintypes
 
 
-def open_windows_resource(path: Path, *, directory: bool) -> int:
+def _open_windows_resource(
+    path: Path, *, directory: bool, write: bool, replace: bool
+) -> int:
     """Pin every Windows path component, rejecting links and reparse points."""
     import msvcrt
 
@@ -206,13 +253,21 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
             attributes = FILE_FLAG_OPEN_REPARSE_POINT | (
                 FILE_FLAG_BACKUP_SEMANTICS if is_directory else 0
             )
-            access = FILE_READ_ATTRIBUTES if is_directory else GENERIC_READ
+            if is_directory:
+                access = FILE_READ_ATTRIBUTES
+            else:
+                access = GENERIC_WRITE if write else GENERIC_READ
+            creation = (
+                CREATE_NEW
+                if write and not replace and index == len(components) - 1
+                else OPEN_EXISTING
+            )
             handle = kernel.CreateFileW(
                 str(component),
                 access,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
-                OPEN_EXISTING,
+                creation,
                 attributes,
                 None,
             )
@@ -236,14 +291,25 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
                 or kernel.GetFileType(handle) != FILE_TYPE_DISK
             ):
                 raise OSError(f"Resource is not a regular file: {component}")
+        mode = os.O_WRONLY if write else os.O_RDONLY
         descriptor: int = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
-            handles[-1], os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            handles[-1], mode | getattr(os, "O_BINARY", 0)
         )
         handles.pop()
         return descriptor
     finally:
         for handle in reversed(handles):
             kernel.CloseHandle(handle)
+
+
+def open_windows_resource(path: Path, *, directory: bool) -> int:
+    """Open a regular file or directory without following reparse points."""
+    return _open_windows_resource(path, directory=directory, write=False, replace=False)
+
+
+def open_windows_writable(path: Path, *, replace: bool) -> int:
+    """Open a regular file for GENERIC_WRITE without following reparse points."""
+    return _open_windows_resource(path, directory=False, write=True, replace=replace)
 
 
 def _open_directory(path: str | Path) -> int:
@@ -436,6 +502,14 @@ def pinned_directory(path: Path) -> Iterator[PinnedDirectory]:
         return
     descriptor = _open_parent(path)
     try:
+        details = os.fstat(descriptor)
+        if details.st_uid != os.geteuid() or details.st_mode & (
+            stat.S_IWGRP | stat.S_IWOTH
+        ):
+            raise OSError(
+                "Preview directory must be owned by the current user and not "
+                "group/other writable"
+            )
         yield PinnedDirectory(path.absolute(), descriptor)
     finally:
         os.close(descriptor)
@@ -450,21 +524,84 @@ def secure_temporary_directory(
         if directory is None:
             raise OSError("A pinned Windows temporary directory is required")
         with _windows_directory_pin(directory):
-            temporary = Path(tempfile.mkdtemp(prefix=prefix, dir=directory))
-            windows_descriptor = open_windows_resource(temporary, directory=True)
+            parent_descriptor = open_windows_resource(directory, directory=True)
+            temporary: Path | None = None
+            windows_descriptor: int | None = None
+            verified = False
             try:
+                parent_identity = _identity(os.fstat(parent_descriptor))
+                temporary = Path(tempfile.mkdtemp(prefix=prefix, dir=directory))
+                if _identity(os.stat(temporary.parent)) != parent_identity:
+                    raise OSError("Windows workspace parent identity changed")
+                expected = _identity(os.stat(temporary))
+                windows_descriptor = open_windows_resource(temporary, directory=True)
+                if _identity(os.fstat(windows_descriptor)) != expected:
+                    raise OSError("Windows workspace identity changed after mkdtemp")
+                verified = True
+                canary_name = f".workspace-canary-{uuid.uuid4().hex}"
+                canary_value = uuid.uuid4().hex.encode("ascii")
+                canary_descriptor = os.open(
+                    temporary / canary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                try:
+                    try:
+                        canary_stream = os.fdopen(canary_descriptor, "wb")
+                    except BaseException:
+                        os.close(canary_descriptor)
+                        raise
+                    with canary_stream:
+                        canary_identity = _identity(os.fstat(canary_descriptor))
+                        canary_stream.write(canary_value)
+                    check_descriptor = open_windows_resource(
+                        temporary / canary_name, directory=False
+                    )
+                    try:
+                        if _identity(os.fstat(check_descriptor)) != canary_identity:
+                            raise OSError("Windows workspace canary identity changed")
+                        contents = bytearray()
+                        while chunk := os.read(check_descriptor, 4096):
+                            contents.extend(chunk)
+                        if bytes(contents) != canary_value:
+                            raise OSError(
+                                "Windows workspace canary verification failed"
+                            )
+                    finally:
+                        os.close(check_descriptor)
+                    if _identity(os.fstat(windows_descriptor)) != expected:
+                        raise OSError(
+                            "Windows workspace identity changed during canary"
+                        )
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(temporary / canary_name)
                 yield PinnedDirectory(temporary, windows_descriptor)
             finally:
-                os.close(windows_descriptor)
-                shutil.rmtree(temporary)
+                try:
+                    if windows_descriptor is not None:
+                        os.close(windows_descriptor)
+                finally:
+                    try:
+                        if temporary is not None:
+                            if verified:
+                                with contextlib.suppress(FileNotFoundError):
+                                    shutil.rmtree(temporary)
+                            else:
+                                with contextlib.suppress(OSError):
+                                    temporary.rmdir()
+                    finally:
+                        os.close(parent_descriptor)
         return
 
     root = _system_temporary_root()
     parent = _writer_temporary_descriptor()
     name = f"{prefix}{uuid.uuid4().hex}"
     descriptor: int | None = None
+    created = False
     try:
         os.mkdir(name, mode=0o700, dir_fd=parent)
+        created = True
         descriptor = os.open(
             name,
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -475,12 +612,19 @@ def secure_temporary_directory(
             raise OSError("Temporary workspace is not private")
         yield PinnedDirectory(root / name, descriptor)
     finally:
-        if descriptor is not None:
+        try:
+            if descriptor is not None:
+                try:
+                    _remove_directory_tree(descriptor)
+                finally:
+                    os.close(descriptor)
+        finally:
             try:
-                _remove_directory_tree(descriptor)
+                if created:
+                    workspace = PinnedDirectory(root / name, parent)
+                    workspace.remove_entry(name)
             finally:
-                os.close(descriptor)
-        os.close(parent)
+                os.close(parent)
 
 
 @contextlib.contextmanager
