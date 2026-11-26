@@ -581,6 +581,8 @@ def test_windows_writable_resource_rejects_reparse_and_uses_create_semantics(
         return 200
 
     def information(_handle, _kind, buffer, _size):
+        if not calls[-1][1] & output_module.FILE_READ_ATTRIBUTES:
+            raise OSError(13, "access denied")
         details = output_module.WindowsFileAttributes.from_address(
             ctypes.cast(buffer, ctypes.c_void_p).value
         )
@@ -620,7 +622,9 @@ def test_windows_writable_resource_rejects_reparse_and_uses_create_semantics(
         )
         osfhandle.assert_called_once()
 
-    assert calls[-1][1] == 0x40000000
+    assert (
+        calls[-1][1] == output_module.GENERIC_WRITE | output_module.FILE_READ_ATTRIBUTES
+    )
     assert (
         calls[-1][2] == output_module.FILE_SHARE_READ | output_module.FILE_SHARE_WRITE
     )

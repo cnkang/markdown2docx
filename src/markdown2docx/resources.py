@@ -233,13 +233,19 @@ def stage_local_resources(
                         os.close(posix_descriptor)
                     if parent is not None:
                         os.close(parent)
-            if workspace is None:
-                target_context = path.open("xb")
-            else:
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                if os.name != "nt":
-                    flags |= os.O_NOFOLLOW
-                target_context = os.fdopen(workspace.open_file(path.name, flags), "wb")
+            try:
+                if workspace is None:
+                    target_context = path.open("xb")
+                else:
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    if os.name != "nt":
+                        flags |= os.O_NOFOLLOW
+                    target_context = os.fdopen(
+                        workspace.open_file(path.name, flags), "wb"
+                    )
+            except BaseException:
+                original.close()
+                raise
             with original, target_context as target:
                 details = os.fstat(original.fileno())
                 if not stat.S_ISREG(details.st_mode) or details.st_size > max_bytes:

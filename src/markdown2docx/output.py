@@ -258,7 +258,9 @@ def _open_windows_resource(
             if is_directory:
                 access = FILE_READ_ATTRIBUTES
             else:
-                access = GENERIC_WRITE if write else GENERIC_READ
+                access = GENERIC_READ
+                if write:
+                    access = GENERIC_WRITE | FILE_READ_ATTRIBUTES
             creation = (
                 CREATE_NEW
                 if write and not replace and index == len(components) - 1
