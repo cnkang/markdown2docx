@@ -14,7 +14,6 @@ import os
 
 # controlled argv, shell=False
 import subprocess  # nosec B404
-import tempfile
 import zipfile
 from pathlib import Path
 from time import perf_counter
@@ -41,7 +40,7 @@ from .exceptions import (
 )
 from .fonts import FontResolver
 from .multilingual import MultilingualDocument, text_of
-from .output import staged_docx_output
+from .output import secure_temporary_directory, staged_docx_output
 from .report import ConversionReport, render_preview
 from .resources import (
     stage_local_resources,
@@ -388,19 +387,24 @@ class MarkdownToDocxConverter:
         document.limits = self.config.limits
         annotated = document.annotate(toc=effective_toc)
         timings["annotate_fonts"] = perf_counter() - annotated_start
-        with tempfile.TemporaryDirectory(prefix="md2docx-convert-") as temporary:
-            root = Path(temporary)
+        with secure_temporary_directory(
+            prefix="md2docx-convert-",
+            directory=output_path.parent if os.name == "nt" else None,
+        ) as workspace:
+            root = workspace.path
             if restricted_mode:
                 stage_local_resources(
                     annotated,
                     input_path.absolute().parent,
                     root,
                     max_bytes=self.config.limits.input_bytes,
+                    workspace=workspace,
                 )
             ast_path = root / "input.json"
-            ast_path.write_text(
-                json.dumps(annotated, ensure_ascii=False), encoding="utf-8"
+            workspace.write_bytes(
+                "input.json", json.dumps(annotated, ensure_ascii=False).encode("utf-8")
             )
+            workspace.assert_pinned()
             # JSON input is the annotated AST, not a second Markdown parse.
             args[args.index("-f") + 1] = "json"
             args.extend(
@@ -414,12 +418,14 @@ class MarkdownToDocxConverter:
                     root / "reference.docx",
                     self.config.template,
                     timeout=self.config.pandoc.timeout_seconds,
+                    workspace=workspace,
                 )
                 args.extend(["--reference-doc", str(reference)])
             try:
                 with staged_docx_output(
                     output_path, overwrite=self.config.conversion.overwrite_existing
                 ) as stage:
+                    workspace.assert_pinned()
                     try:
                         write_start = perf_counter()
                         write_docx(
