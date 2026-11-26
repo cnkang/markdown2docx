@@ -123,3 +123,28 @@ def test_skill_documents_all_offline_boundaries():
     assert "prevents the converter from downloading fonts" in skill
     assert "pass `--resources-offline`" in skill
     assert "uv offline mode is not a Pandoc sandbox" in skill
+
+
+@pytest.mark.parametrize(
+    ("filename", "obsolete", "required"),
+    [
+        (
+            "README.md",
+            "previous reviewed runtime",
+            ("immutable reviewed remediation commit",),
+        ),
+        (
+            "README_zh.md",
+            "先前已验收版本",
+            ("已评审的 remediation commit", "不可变"),
+        ),
+    ],
+)
+def test_readmes_document_the_immutable_reviewed_remediation_pin(
+    filename, obsolete, required
+):
+    readme = (REPO_ROOT / filename).read_text(encoding="utf-8")
+
+    assert obsolete not in readme
+    for phrase in required:
+        assert phrase in readme
