@@ -1120,6 +1120,12 @@ def test_tar_preflight_accepts_bounded_extension_headers(validator, tmp_path):
             "extension|single|limit",
         ),
         (
+            "MAX_TAR_EXTENSION_MEMBER_BYTES",
+            1024,
+            [(f"{SDIST_ROOT}/solaris", 1025, b"X")],
+            "extension|single|limit",
+        ),
+        (
             "MAX_TAR_EXTENSION_BYTES",
             1024,
             [
@@ -1129,11 +1135,29 @@ def test_tar_preflight_accepts_bounded_extension_headers(validator, tmp_path):
             "extension|total|limit",
         ),
         (
+            "MAX_TAR_EXTENSION_BYTES",
+            1024,
+            [
+                (f"{SDIST_ROOT}/solaris1", 512, b"X"),
+                (f"{SDIST_ROOT}/solaris2", 513, b"X"),
+            ],
+            "extension|total|limit",
+        ),
+        (
             "MAX_TAR_EXTENSION_HEADERS",
             1,
             [
                 (f"{SDIST_ROOT}/long1", 1, b"L"),
                 (f"{SDIST_ROOT}/long2", 1, b"K"),
+            ],
+            "extension|count|limit",
+        ),
+        (
+            "MAX_TAR_EXTENSION_HEADERS",
+            1,
+            [
+                (f"{SDIST_ROOT}/solaris1", 1, b"X"),
+                (f"{SDIST_ROOT}/solaris2", 1, b"X"),
             ],
             "extension|count|limit",
         ),
