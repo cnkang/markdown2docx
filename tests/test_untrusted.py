@@ -9,6 +9,7 @@ import sys
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -478,6 +479,8 @@ def test_windows_resource_links_cannot_escape_document(tmp_path, entry, kind):
 
 
 def test_windows_resource_constants_are_named():
+    import ctypes
+
     from markdown2docx import output
 
     assert output.FILE_READ_ATTRIBUTES == 0x80
@@ -489,7 +492,12 @@ def test_windows_resource_constants_are_named():
     assert output.FILE_FLAG_BACKUP_SEMANTICS == 0x02000000
     assert output.FILE_ATTRIBUTE_REPARSE_POINT == 0x400
     assert output.FILE_ATTRIBUTE_DIRECTORY == 0x10
-    assert output.FILE_ATTRIBUTE_NORMAL == 0x80
+    assert output.FILE_TYPE_DISK == 1
+    assert output.INVALID_HANDLE_VALUE == ctypes.c_void_p(-1).value
+    assert output.WindowsFileAttributes._fields_ == [
+        ("attributes", ctypes.c_uint32),
+        ("tag", ctypes.c_uint32),
+    ]
 
 
 def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
@@ -504,6 +512,9 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
     handle_index = 0
     opened: list[str] = []
     access_modes: list[int] = []
+    file_attributes = 0x821
+    file_type = 1
+    invalid_handle = False
 
     class Structure(ctypes.Structure):
         _fields_ = [("attributes", ctypes.c_uint32), ("tag", ctypes.c_uint32)]
@@ -516,6 +527,8 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
 
             def create_file(path, access, *args):
                 nonlocal handle_index
+                if invalid_handle:
+                    return ctypes.c_void_p(-1).value
                 handle = handles[handle_index]
                 handle_index += 1
                 opened.append(path)
@@ -534,10 +547,11 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
                 if reparse_kind == "reparse":
                     target.attributes |= 0x400
                 if reparse_kind == "file" and opened[-1].endswith("resource"):
-                    target.attributes = 0x80
+                    target.attributes = file_attributes
                 return True
 
             self.GetFileInformationByHandleEx = Mock(side_effect=information)
+            self.GetFileType = Mock(side_effect=lambda handle: file_type)
 
     modules = {
         "ctypes": ctypes,
@@ -559,8 +573,14 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "ctypes.wintypes", modules["ctypes.wintypes"])
     monkeypatch.setitem(sys.modules, "msvcrt", modules["msvcrt"])
     monkeypatch.setattr(ctypes, "WinDLL", WinDLL, raising=False)
+    resource_os = SimpleNamespace(
+        name="nt",
+        path=os.path,
+        fspath=os.fspath,
+        close=os.close,
+    )
     with ExitStack() as stack:
-        stack.enter_context(patch.object(output.os, "name", "nt"))
+        stack.enter_context(patch("markdown2docx.resources.os", resource_os))
         handle_index = 0
         opened.clear()
         access_modes.clear()
@@ -592,8 +612,27 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
         assert all(call.args[5] & 0x02000000 for call in calls[:-1])
         assert not calls[-1].args[5] & 0x02000000
         assert kernel.CloseHandle.call_count == len(calls) - 1
+        kernel.GetFileType.assert_called_once_with(handles[handle_index - 1])
         assert modules["msvcrt"].open_osfhandle.called
 
+        file_attributes = 0x80
+        file_type = 2
+        handle_index = 0
+        opened.clear()
+        access_modes.clear()
+        with pytest.raises(OSError, match="regular file"):
+            output.open_windows_resource(tmp_path / "resource", directory=False)
+
+        file_attributes = output.FILE_ATTRIBUTE_DIRECTORY
+        file_type = 1
+        handle_index = 0
+        opened.clear()
+        access_modes.clear()
+        with pytest.raises(OSError, match="regular file"):
+            output.open_windows_resource(tmp_path / "resource", directory=False)
+
+        file_attributes = 0x821
+        file_type = 1
         modules["msvcrt"].open_osfhandle.side_effect = OSError("fd conversion failed")
         handle_index = 0
         opened.clear()
@@ -603,6 +642,74 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
             output.open_windows_resource(tmp_path / "resource", directory=False)
         failed_kernel = kernels[-1]
         assert failed_kernel.CloseHandle.call_count == len(opened)
+
+        monkeypatch.setattr(
+            ctypes,
+            "WinError",
+            lambda code: FileNotFoundError(f"missing resource ({code})"),
+            raising=False,
+        )
+        monkeypatch.setattr(ctypes, "get_last_error", lambda: 2, raising=False)
+        invalid_handle = True
+        handle_index = 0
+        opened.clear()
+        access_modes.clear()
+        with pytest.raises(FileNotFoundError, match="missing resource"):
+            output.open_windows_resource(tmp_path / "resource", directory=False)
+        from markdown2docx.resources import _validate_restricted_image
+
+        with pytest.raises(ConversionError, match="does not exist"):
+            _validate_restricted_image(tmp_path, tmp_path / "resource")
+
+
+def test_windows_output_reuses_shared_attribute_contract(monkeypatch, tmp_path):
+    import ctypes
+
+    from markdown2docx import output
+
+    calls = []
+
+    def create_file(path, access, share, security, creation, flags, template):
+        calls.append((path, access, share, creation, flags))
+        return 200
+
+    kernel = SimpleNamespace(
+        CreateFileW=Mock(side_effect=create_file),
+        CloseHandle=Mock(),
+        GetFileInformationByHandleEx=Mock(
+            side_effect=lambda handle, kind, buffer, size: (
+                setattr(
+                    output.WindowsFileAttributes.from_address(
+                        ctypes.cast(buffer, ctypes.c_void_p).value
+                    ),
+                    "attributes",
+                    output.FILE_ATTRIBUTE_DIRECTORY,
+                )
+                or True
+            )
+        ),
+    )
+    windows = SimpleNamespace(
+        WinError=lambda code: OSError(code),
+        get_last_error=lambda: 2,
+    )
+    wintypes = SimpleNamespace(DWORD=ctypes.c_uint32)
+    monkeypatch.setattr(output, "_windows_api", lambda: (windows, kernel, wintypes))
+    destination = tmp_path / "output.docx"
+
+    with output._windows_output(destination, overwrite=True) as source:
+        source.write_bytes(b"document")
+
+    assert destination.read_bytes() == b"document"
+    assert calls
+    assert all(access == output.FILE_READ_ATTRIBUTES for _, access, _, _, _ in calls)
+    assert all(share == 0x3 for _, _, share, _, _ in calls)
+    assert all(creation == output.OPEN_EXISTING for _, _, _, creation, _ in calls)
+    assert all(
+        flags == output.FILE_FLAG_OPEN_REPARSE_POINT | output.FILE_FLAG_BACKUP_SEMANTICS
+        for _, _, _, _, flags in calls
+    )
+    assert kernel.CloseHandle.called
 
 
 @pytest.mark.parametrize(
