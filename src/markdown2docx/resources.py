@@ -1,5 +1,6 @@
 """Explicit boundaries for documents with external resources or filters."""
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -74,6 +75,10 @@ def _open_restricted_parent(root: Path, candidate: Path) -> tuple[int, str]:
 
 def _validate_restricted_image(root: Path, path: Path) -> str:
     normalized_root, candidate = _lexical_paths(root, path)
+    if os.path.normcase(os.fspath(candidate)) == os.path.normcase(
+        os.fspath(normalized_root)
+    ):
+        raise ConversionError("", "Image resource must be a regular file")
     if os.name == "nt":
         from .output import open_windows_resource
 
@@ -194,14 +199,30 @@ def stage_local_resources(
                     ) from exc
                 original = os.fdopen(descriptor, "rb")
             else:
-                parent = _open_parent(source.parent)
+                posix_descriptor: int | None = None
+                parent: int | None = None
                 try:
-                    descriptor = os.open(
+                    parent = _open_parent(source.parent)
+                    posix_descriptor = os.open(
                         source.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent
                     )
-                    original = os.fdopen(descriptor, "rb")
+                    original = os.fdopen(posix_descriptor, "rb")
+                    posix_descriptor = None
+                except FileNotFoundError as exc:
+                    raise ConversionError("", "Image resource does not exist") from exc
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise ConversionError(
+                            "", "Image resource contains a symbolic link"
+                        ) from exc
+                    raise ConversionError(
+                        "", "Unable to stage image resource safely"
+                    ) from exc
                 finally:
-                    os.close(parent)
+                    if posix_descriptor is not None:
+                        os.close(posix_descriptor)
+                    if parent is not None:
+                        os.close(parent)
             with original, path.open("xb") as target:
                 details = os.fstat(original.fileno())
                 if not stat.S_ISREG(details.st_mode) or details.st_size > max_bytes:

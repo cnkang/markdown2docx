@@ -14,6 +14,19 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+FILE_READ_ATTRIBUTES = 0x80
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ = 0x1
+FILE_SHARE_WRITE = 0x2
+OPEN_EXISTING = 3
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+FILE_ATTRIBUTE_DIRECTORY = 0x10
+FILE_ATTRIBUTE_NORMAL = 0x80
+FILE_ATTRIBUTE_TAG_INFO = 9
+INVALID_HANDLE_VALUE = -1
+
 
 def _windows_api() -> tuple[Any, Any, Any]:
     """Load the Windows handle APIs without importing them on other platforms."""
@@ -70,28 +83,40 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
     try:
         for index, component in enumerate(components):
             is_directory = index < len(components) - 1 or directory
-            attributes = 0x02000000 | (0x00200000 if is_directory else 0)
-            access = 0x80 if is_directory else 0x80000000
-            handle = kernel.CreateFileW(
-                str(component), access, 0x3, None, 3, attributes, None
+            attributes = FILE_FLAG_OPEN_REPARSE_POINT | (
+                FILE_FLAG_BACKUP_SEMANTICS if is_directory else 0
             )
-            if handle == ctypes.c_void_p(-1).value:
+            access = FILE_READ_ATTRIBUTES if is_directory else GENERIC_READ
+            handle = kernel.CreateFileW(
+                str(component),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                attributes,
+                None,
+            )
+            if handle == INVALID_HANDLE_VALUE:
                 raise windows.WinError(windows.get_last_error())
             handles.append(handle)
             info = Attributes()
             if not kernel.GetFileInformationByHandleEx(
-                handle, 9, ctypes.byref(info), ctypes.sizeof(info)
+                handle,
+                FILE_ATTRIBUTE_TAG_INFO,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
             ):
                 raise windows.WinError(windows.get_last_error())
-            if info.attributes & 0x400:
+            if info.attributes & FILE_ATTRIBUTE_REPARSE_POINT:
                 raise OSError(f"Refusing resource reparse point: {component}")
-            if is_directory and not info.attributes & 0x10:
+            if is_directory and not info.attributes & FILE_ATTRIBUTE_DIRECTORY:
                 raise OSError(f"Resource directory is not a directory: {component}")
-            if not is_directory and not info.attributes & 0x20:
+            if not is_directory and not info.attributes & FILE_ATTRIBUTE_NORMAL:
                 raise OSError(f"Resource is not a regular file: {component}")
         descriptor: int = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
-            handles.pop(), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            handles[-1], os.O_RDONLY | getattr(os, "O_BINARY", 0)
         )
+        handles.pop()
         return descriptor
     finally:
         for handle in reversed(handles):

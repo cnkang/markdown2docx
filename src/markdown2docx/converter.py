@@ -33,6 +33,7 @@ except ImportError:
 from .archive import validate_archive
 from .config import MarkdownToDocxConfig
 from .exceptions import (
+    ConfigurationError,
     ConversionError,
     PandocError,
     PandocNotFoundError,
@@ -185,6 +186,16 @@ class MarkdownToDocxConverter:
         preview_dir: str | Path | None = None,
     ) -> ConversionReport:
         """Convert with restricted resources and offline fonts, regardless of overrides."""
+        for name, value in (
+            ("offline", offline),
+            ("resources_offline", resources_offline),
+            ("restricted", restricted),
+        ):
+            if value is False:
+                raise ConfigurationError(
+                    f"untrusted.{name}",
+                    f"Untrusted conversion does not accept {name}=False",
+                )
         return self.convert_with_report(
             input_path,
             output_path,
