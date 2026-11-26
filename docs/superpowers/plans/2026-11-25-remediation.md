@@ -92,9 +92,9 @@
 
 **Files:** `src/markdown2docx/converter.py`, `src/markdown2docx/cli.py`, `src/markdown2docx/__init__.py`, `tests/test_optimization.py`, `tests/test_cli.py`
 
-- [ ] Add failing API/CLI tests proving `convert_untrusted()` and `--untrusted` reject remote/out-of-root images, raw nodes, filters, and defaults before writer execution.
-- [ ] Implement safe defaults while preserving trusted `convert()` behavior.
-- [ ] Run focused/full tests; commit `feat: add safe untrusted conversion entry point`.
+- [x] Add failing API/CLI tests proving `convert_untrusted()` and `--untrusted` reject remote/out-of-root images, raw nodes, filters, defaults, and policy weakening before writer execution.
+- [x] Implement non-overridable safe defaults, lexical-first path checks, POSIX descriptor isolation, and Windows reparse-safe readable handles while preserving trusted `convert()` behavior.
+- [x] Run focused/full tests (`775 passed, 15 skipped`); final fix `530f75c`.
 
 ### Task 10: Secure conversion and preview workspaces
 
