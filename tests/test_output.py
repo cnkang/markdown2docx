@@ -46,6 +46,19 @@ def test_mkdir_if_missing_tolerates_concurrent_creation(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "mkdir", racing_mkdir)
     output_module._mkdir_if_missing(target)
     assert target.is_dir()
+    output_module._mkdir_if_missing(target)
+
+
+def test_mkdir_if_missing_does_not_mkdir_existing_directory(tmp_path, monkeypatch):
+    existing = tmp_path / "existing"
+
+    def unexpected_mkdir(self, *args, **kwargs):
+        raise AssertionError(f"unexpected mkdir for {self}")
+
+    existing.mkdir()
+    monkeypatch.setattr(Path, "mkdir", unexpected_mkdir)
+    output_module._mkdir_if_missing(existing)
+    assert existing.is_dir()
 
 
 class WindowsOSProxy:
