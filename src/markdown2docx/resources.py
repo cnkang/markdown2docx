@@ -36,8 +36,13 @@ def validate_resources(
                     else Path(unquote(parsed.path))
                 )
                 path = path if path.is_absolute() else root / path
+                resolved_root = root.resolve()
+                if not path.resolve(strict=False).is_relative_to(resolved_root):
+                    raise ConversionError(
+                        "", "Image is outside the document resource directory"
+                    )
                 resolved = path.resolve(strict=True)
-                if not resolved.is_relative_to(root.resolve()):
+                if not resolved.is_relative_to(resolved_root):
                     raise ConversionError(
                         "", "Image is outside the document resource directory"
                     )

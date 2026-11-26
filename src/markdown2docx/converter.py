@@ -154,6 +154,54 @@ class MarkdownToDocxConverter:
             logger.warning("%s: %s", warning["code"], warning["message"])
         return Path(report.output_path)
 
+    def convert_untrusted(
+        self,
+        input_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        **kwargs: Any,
+    ) -> Path:
+        """Convert untrusted Markdown with the non-overridable safe resource policy."""
+        report = self.convert_untrusted_with_report(input_path, output_path, **kwargs)
+        for warning in report.warnings:
+            logger.warning("%s: %s", warning["code"], warning["message"])
+        return Path(report.output_path)
+
+    def convert_untrusted_with_report(
+        self,
+        input_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        *,
+        toc: Optional[bool] = None,
+        toc_depth: Optional[int] = None,
+        extra_args: Optional[Sequence[str]] = None,
+        validate_output: Optional[bool] = None,
+        lang: str | None = None,
+        direction: str | None = None,
+        offline: bool | None = None,
+        allow_unverified_fonts: bool | None = None,
+        resources_offline: bool | None = None,
+        restricted: bool | None = None,
+        render: bool = False,
+        preview_dir: str | Path | None = None,
+    ) -> ConversionReport:
+        """Convert with restricted resources and offline fonts, regardless of overrides."""
+        return self.convert_with_report(
+            input_path,
+            output_path,
+            toc=toc,
+            toc_depth=toc_depth,
+            extra_args=extra_args,
+            validate_output=validate_output,
+            lang=lang,
+            direction=direction,
+            offline=True,
+            allow_unverified_fonts=allow_unverified_fonts,
+            resources_offline=True,
+            restricted=True,
+            render=render,
+            preview_dir=preview_dir,
+        )
+
     def convert_with_report(
         self,
         input_path: Union[str, Path],
