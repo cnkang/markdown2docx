@@ -1,6 +1,7 @@
 """Fail-closed contracts for reusable CI and same-commit release gates."""
 
 import os
+import shutil
 import subprocess
 from copy import deepcopy
 from pathlib import Path
@@ -171,7 +172,46 @@ def tag_structure_errors(step):
     return errors
 
 
-def run_tag_validation(step, release_ref, run_ref, run_ref_type):
+def git_bash_candidates():
+    candidates = []
+    for variable in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        install_root = os.environ.get(variable)
+        if install_root:
+            candidates.append(str(Path(install_root) / "Git" / "bin" / "bash.exe"))
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(
+            str(Path(local_app_data) / "Programs" / "Git" / "bin" / "bash.exe")
+        )
+    return candidates
+
+
+def find_bash(*, windows=None):
+    if windows is None:
+        windows = os.name == "nt"
+    candidates = git_bash_candidates() if windows else []
+    path_bash = shutil.which("bash")
+    if path_bash:
+        candidates.append(path_bash)
+    for candidate in dict.fromkeys(candidates):
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "-e", "-c", "exit 0"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except OSError, subprocess.SubprocessError:
+            continue
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
+def run_tag_validation(bash, step, release_ref, run_ref, run_ref_type):
     env = os.environ.copy()
     env.update(
         RELEASE_REF=release_ref,
@@ -179,7 +219,7 @@ def run_tag_validation(step, release_ref, run_ref, run_ref_type):
         RUN_REF_TYPE=run_ref_type,
     )
     return subprocess.run(
-        ["bash", "-e", "-c", step["run"]],
+        [bash, "-e", "-c", step["run"]],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
@@ -254,6 +294,16 @@ def test_workflow_fixture():
 @pytest.fixture(name="release_workflow")
 def release_workflow_fixture():
     return load_workflow("release.yml")
+
+
+@pytest.fixture(scope="module")
+def bash_executable():
+    executable = find_bash()
+    if executable is None:
+        pytest.skip(
+            "a working Bash executable is required for release tag script tests"
+        )
+    return executable
 
 
 def test_test_workflow_supports_push_pull_request_and_call(test_workflow):
@@ -595,27 +645,45 @@ def test_find_bash_uses_path_on_posix(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("release_ref", "run_ref", "run_ref_type"),
+    ("release_ref", "run_ref", "run_ref_type", "expected_error"),
     [
-        ("1.2.3", "1.2.3", "tag"),
-        ("v1.2.3", "v1.2.3", "branch"),
-        ("v1.2.3", "v9.9.9", "tag"),
+        ("1.2.3", "1.2.3", "tag", "Expected a vX.Y.Z release tag"),
+        (
+            "v1.2.3",
+            "v1.2.3",
+            "branch",
+            "Dispatch this workflow on the reviewed release tag itself",
+        ),
+        (
+            "v1.2.3",
+            "v9.9.9",
+            "tag",
+            "Dispatch this workflow on the reviewed release tag itself",
+        ),
     ],
 )
 def test_release_tag_validation_rejects_invalid_dispatch(
-    release_workflow, release_ref, run_ref, run_ref_type
+    release_workflow,
+    bash_executable,
+    release_ref,
+    run_ref,
+    run_ref_type,
+    expected_error,
 ):
     tag_step = step_by_id(release_workflow["jobs"]["build"], "require-release-tag")
 
-    result = run_tag_validation(tag_step, release_ref, run_ref, run_ref_type)
+    result = run_tag_validation(
+        bash_executable, tag_step, release_ref, run_ref, run_ref_type
+    )
 
-    assert result.returncode != 0
+    assert result.returncode == 1, result.stdout or result.stderr
+    assert expected_error in result.stdout
 
 
-def test_release_tag_validation_accepts_matching_tag(release_workflow):
+def test_release_tag_validation_accepts_matching_tag(release_workflow, bash_executable):
     tag_step = step_by_id(release_workflow["jobs"]["build"], "require-release-tag")
 
-    result = run_tag_validation(tag_step, "v1.2.3", "v1.2.3", "tag")
+    result = run_tag_validation(bash_executable, tag_step, "v1.2.3", "v1.2.3", "tag")
 
     assert result.returncode == 0, result.stderr
 
