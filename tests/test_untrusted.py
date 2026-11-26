@@ -161,7 +161,7 @@ PIXEL_PNG = base64.b64decode(
 )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="macOS system temporary alias")
+@pytest.mark.skipif(os.name == "nt", reason="posix_only: macOS system temporary alias")
 def test_restricted_conversion_under_macos_tmp_alias(monkeypatch):
     document = Path(tempfile.mkdtemp(prefix="resource-root-", dir="/tmp"))
     source = document / "input.md"
@@ -203,7 +203,9 @@ def test_lexical_escapes_fail_before_path_resolution(tmp_path, location):
         validate_resources(ast, document, offline=False, restricted=True)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow directory validation")
+@pytest.mark.skipif(
+    os.name == "nt", reason="posix_only: POSIX no-follow directory validation"
+)
 def test_symlink_escape_does_not_touch_external_canary(tmp_path):
     document = tmp_path / "document"
     document.mkdir()
@@ -244,7 +246,7 @@ def test_symlink_escape_does_not_touch_external_canary(tmp_path):
     assert any(path == "escape" and flags & os.O_NOFOLLOW for path, flags in accesses)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow staging")
+@pytest.mark.skipif(os.name == "nt", reason="posix_only: POSIX no-follow staging")
 def test_posix_staging_maps_deleted_resource_to_conversion_error(tmp_path):
     document = tmp_path / "document"
     document.mkdir()
@@ -258,7 +260,7 @@ def test_posix_staging_maps_deleted_resource_to_conversion_error(tmp_path):
         stage_local_resources(ast, document, tmp_path / "staged", max_bytes=1024)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow staging")
+@pytest.mark.skipif(os.name == "nt", reason="posix_only: POSIX no-follow staging")
 def test_posix_staging_rejects_resource_replaced_with_symlink(tmp_path):
     document = tmp_path / "document"
     document.mkdir()
@@ -278,7 +280,7 @@ def test_posix_staging_rejects_resource_replaced_with_symlink(tmp_path):
     assert not list((tmp_path / "staged").glob("*"))
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor staging")
+@pytest.mark.skipif(os.name == "nt", reason="posix_only: POSIX descriptor staging")
 @pytest.mark.parametrize(
     ("operation", "error", "message"),
     [
