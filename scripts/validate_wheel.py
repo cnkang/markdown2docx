@@ -44,6 +44,7 @@ MAX_WHEEL_MEMBERS = 10_000
 MAX_WHEEL_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
 MAX_WHEEL_MEMBER_BYTES = 32 * 1024 * 1024
 MAX_WHEEL_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+MAX_SDIST_BYTES = 64 * 1024 * 1024
 MAX_SDIST_MEMBERS = 10_000
 MAX_SDIST_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_SDIST_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
@@ -541,17 +542,44 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _check_sdist_physical_size(path: Path) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise DistributionError(
+            f"Unable to stat sdist artifact {path}: {error}"
+        ) from error
+    if size > MAX_SDIST_BYTES:
+        raise DistributionError(
+            f"Sdist exceeds the physical file size limit: {size} > {MAX_SDIST_BYTES}"
+        )
+
+
 @contextmanager
 def _sdist_snapshot(path: Path) -> Iterator[tuple[Path, str]]:
+    _check_sdist_physical_size(path)
     with tempfile.TemporaryDirectory(prefix="md2docx-sdist-snapshot-") as directory:
         root = Path(directory)
         root.chmod(0o700)
         snapshot = root / path.name
         digest = hashlib.sha256()
+        copied_bytes = 0
         with path.open("rb") as source, snapshot.open("xb") as target:
+            if os.fstat(source.fileno()).st_size > MAX_SDIST_BYTES:
+                raise DistributionError("Sdist exceeds the physical file size limit")
             while chunk := source.read(READ_CHUNK_SIZE):
+                copied_bytes += len(chunk)
+                if copied_bytes > MAX_SDIST_BYTES:
+                    raise DistributionError(
+                        "Sdist exceeds the physical file size limit during snapshot copy"
+                    )
                 target.write(chunk)
                 digest.update(chunk)
+            target.flush()
+            if os.fstat(target.fileno()).st_size > MAX_SDIST_BYTES:
+                raise DistributionError(
+                    "Sdist snapshot exceeds the physical file size limit after copy"
+                )
         expected_hash = digest.hexdigest()
         _verify_sdist_snapshot(snapshot, expected_hash)
         yield snapshot, expected_hash
