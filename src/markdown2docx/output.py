@@ -164,7 +164,9 @@ class PinnedDirectory:
         if platform.system() == "Darwin":
             import fcntl
 
-            mac_value = fcntl.fcntl(self.descriptor, fcntl.F_GETPATH, bytearray(1024))
+            mac_value = fcntl.fcntl(
+                self.descriptor, cast(Any, fcntl).F_GETPATH, bytearray(1024)
+            )
             return Path(os.fsdecode(mac_value).rstrip("\0"))
         proc_value = os.readlink(f"/proc/self/fd/{self.descriptor}")
         if proc_value.endswith(" (deleted)"):
