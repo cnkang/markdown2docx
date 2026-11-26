@@ -82,7 +82,7 @@ def test_concurrent_previews_publish_separate_generations(tmp_path, renderer):
                 range(2),
             )
         )
-    assert all(report["status"] == "rendered" for report in results)
+    assert all(report["status"] == "rendered" for report in results), results
     assert results[0]["pdf"] != results[1]["pdf"]
     assert all(Path(report["pdf"]).read_bytes() == b"current PDF" for report in results)
 

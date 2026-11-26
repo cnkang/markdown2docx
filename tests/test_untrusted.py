@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pypandoc
 import pytest
 
 import markdown2docx
@@ -36,7 +37,7 @@ def parse_ast(directory, markdown):
     source.write_text(markdown, encoding="utf-8")
     parsed = subprocess.run(
         [
-            "pandoc",
+            pypandoc.get_pandoc_path(),
             "-f",
             "gfm",
             "-t",
@@ -371,6 +372,9 @@ def test_windows_document_root_is_rejected_before_open(tmp_path, monkeypatch):
     opener.assert_not_called()
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="posix_only: POSIX directory descriptor semantics"
+)
 def test_posix_resource_validation_pins_document_root_once(tmp_path, monkeypatch):
     import markdown2docx.output as output_module
 
