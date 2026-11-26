@@ -1,9 +1,12 @@
 """Default-safe conversion for Markdown whose caller is not trusted."""
 
+import base64
 import json
 import os
 import subprocess
 import sys
+import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -14,7 +17,7 @@ from markdown2docx import MarkdownToDocxConverter
 from markdown2docx.cli import handle_conversion
 from markdown2docx.config import MarkdownToDocxConfig
 from markdown2docx.exceptions import ConversionError
-from markdown2docx.resources import validate_resources
+from markdown2docx.resources import stage_local_resources, validate_resources
 
 
 def untrusted_converter(tmp_path):
@@ -150,6 +153,28 @@ def image_ast(location):
     return {"t": "Image", "c": [["", [], []], [], [location, ""]]}
 
 
+PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="macOS system temporary alias")
+def test_restricted_conversion_under_macos_tmp_alias(monkeypatch):
+    document = Path(tempfile.mkdtemp(prefix="resource-root-", dir="/tmp"))
+    source = document / "input.md"
+    source.write_text("![pixel](image.png)\n", encoding="utf-8")
+    (document / "image.png").write_bytes(PIXEL_PNG)
+    output = document / "output.docx"
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    from zipfile import ZipFile
+
+    path = MarkdownToDocxConverter().convert_untrusted(source, output)
+
+    assert path == output
+    with ZipFile(path) as archive:
+        assert any(name.startswith("word/media/") for name in archive.namelist())
+
+
 @pytest.mark.parametrize(
     "location",
     [
@@ -188,20 +213,203 @@ def test_symlink_escape_does_not_touch_external_canary(tmp_path):
     ast = image_ast("escape/canary.png")
     accesses = []
     original_open = os.open
+    root_descriptor = os.open(document, os.O_RDONLY | os.O_DIRECTORY)
 
     def record_open(path, flags, *args, **kwargs):
         accesses.append((os.fspath(path), flags))
         return original_open(path, flags, *args, **kwargs)
 
-    with (
-        patch("os.open", side_effect=record_open),
-        pytest.raises(ConversionError, match="symbolic link"),
-    ):
-        validate_resources(ast, document, offline=False, restricted=True)
+    try:
+        with (
+            patch("markdown2docx.output._open_parent", return_value=root_descriptor),
+            patch("os.open", side_effect=record_open),
+            pytest.raises(ConversionError, match="symbolic link"),
+        ):
+            validate_resources(ast, document, offline=False, restricted=True)
+    finally:
+        try:
+            os.close(root_descriptor)
+        except OSError:
+            pass
 
     assert canary.read_bytes() == b"external canary"
     assert not any("canary.png" in path for path, _ in accesses)
     assert any(path == "escape" and flags & os.O_NOFOLLOW for path, flags in accesses)
+
+
+def test_posix_resource_validation_pins_document_root_once(tmp_path, monkeypatch):
+    import markdown2docx.output as output_module
+
+    document = tmp_path / "document"
+    document.mkdir()
+    image = document / "image.png"
+    image.write_bytes(PIXEL_PNG)
+    root_descriptor = os.open(document, os.O_RDONLY | os.O_DIRECTORY)
+    calls = []
+
+    def pin_root(path):
+        calls.append(path)
+        return os.dup(root_descriptor)
+
+    monkeypatch.setattr(output_module, "_open_parent", pin_root)
+    try:
+        validate_resources(
+            image_ast("image.png"), document, offline=False, restricted=True
+        )
+    finally:
+        os.close(root_descriptor)
+
+    assert calls == [document]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows secure handle contract")
+@pytest.mark.parametrize("entry", ["validation", "staging"])
+def test_windows_missing_resource_has_stable_error(tmp_path, entry):
+    document = tmp_path / "document"
+    document.mkdir()
+    missing = document / "missing.png"
+    with pytest.raises(ConversionError, match="does not exist"):
+        if entry == "validation":
+            validate_resources(
+                image_ast("missing.png"), document, offline=False, restricted=True
+            )
+        else:
+            stage_local_resources(
+                image_ast(str(missing)), document, tmp_path / "staged", max_bytes=1024
+            )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction and symlink semantics")
+@pytest.mark.parametrize("entry", ["validation", "staging"])
+@pytest.mark.parametrize("kind", ["junction", "symlink"])
+def test_windows_resource_links_cannot_escape_document(tmp_path, entry, kind):
+    document = tmp_path / "document"
+    document.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    canary = outside / "canary.png"
+    canary.write_bytes(b"external canary")
+    link = document / "escape"
+    if kind == "junction":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"Directory symlink privilege unavailable: {exc}")
+    try:
+        with pytest.raises(ConversionError, match="reparse point|symbolic link"):
+            if entry == "validation":
+                validate_resources(
+                    image_ast("escape/canary.png"),
+                    document,
+                    offline=False,
+                    restricted=True,
+                )
+            else:
+                stage_local_resources(
+                    image_ast(str(link / "canary.png")),
+                    document,
+                    tmp_path / "staged",
+                    max_bytes=1024,
+                )
+        assert canary.read_bytes() == b"external canary"
+        assert not list((tmp_path / "staged").glob("*"))
+    finally:
+        if kind == "junction":
+            link.rmdir()
+        else:
+            link.unlink()
+
+
+def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
+    """Run the Windows API contract on every host with a minimal ctypes double."""
+    import ctypes
+    import sys
+
+    from markdown2docx import output
+
+    handles = list(range(100, 140))
+    handle_index = 0
+    opened: list[str] = []
+
+    class Structure(ctypes.Structure):
+        _fields_ = [("attributes", ctypes.c_uint32), ("tag", ctypes.c_uint32)]
+
+    reparse_kind = "reparse"
+
+    class WinDLL:
+        def __init__(self, *args, **kwargs):
+            def create_file(path, *args):
+                nonlocal handle_index
+                handle = handles[handle_index]
+                handle_index += 1
+                opened.append(path)
+                return handle
+
+            self.CreateFileW = Mock(side_effect=create_file)
+            self.CloseHandle = Mock()
+
+            def information(handle, kind, buffer, size):
+                target = Structure.from_address(
+                    ctypes.cast(buffer, ctypes.c_void_p).value
+                )
+                target.attributes = 0x10
+                target.tag = 0
+                if reparse_kind == "reparse":
+                    target.attributes |= 0x400
+                if reparse_kind == "file" and opened[-1].endswith("resource"):
+                    target.attributes = 0x20
+                return True
+
+            self.GetFileInformationByHandleEx = Mock(side_effect=information)
+
+    modules = {
+        "ctypes": ctypes,
+        "ctypes.wintypes": type(
+            "Wintypes",
+            (),
+            {
+                "DWORD": ctypes.c_uint32,
+                "HANDLE": ctypes.c_void_p,
+                "LPCWSTR": ctypes.c_wchar_p,
+                "BOOL": ctypes.c_int,
+            },
+        ),
+        "msvcrt": Mock(
+            open_osfhandle=Mock(side_effect=lambda handle, flags: handle + 1000)
+        ),
+    }
+    monkeypatch.setitem(sys.modules, "ctypes", ctypes)
+    monkeypatch.setitem(sys.modules, "ctypes.wintypes", modules["ctypes.wintypes"])
+    monkeypatch.setitem(sys.modules, "msvcrt", modules["msvcrt"])
+    monkeypatch.setattr(ctypes, "WinDLL", WinDLL, raising=False)
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(output.os, "name", "nt"))
+        handle_index = 0
+        opened.clear()
+        reparse_kind = "reparse"
+        with pytest.raises(OSError, match="reparse point"):
+            output.open_windows_resource(tmp_path / "resource", directory=True)
+        handle_index = 0
+        opened.clear()
+        reparse_kind = "reparse"
+        with pytest.raises(OSError, match="reparse point"):
+            output.open_windows_resource(tmp_path / "resource", directory=False)
+        monkeypatch.setattr(output.os, "O_BINARY", 0x8000, raising=False)
+        handle_index = 0
+        opened.clear()
+        reparse_kind = "file"
+        descriptor = output.open_windows_resource(
+            tmp_path / "resource", directory=False
+        )
+        assert descriptor >= 1100
+    assert modules["msvcrt"].open_osfhandle.called
 
 
 @pytest.mark.parametrize(
