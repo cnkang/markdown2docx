@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
 import shutil
 import stat
@@ -11,19 +12,116 @@ import tempfile
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+
+def _windows_api() -> tuple[Any, Any, Any]:
+    """Load the Windows handle APIs without importing them on other platforms."""
+    import ctypes
+    from ctypes import wintypes
+    from typing import Any, cast
+
+    windows = cast(Any, ctypes)
+    kernel = windows.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        getattr(wintypes, "LPCWSTR", ctypes.c_wchar_p),
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = getattr(wintypes, "BOOL", ctypes.c_int)
+    kernel.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel.GetFileInformationByHandleEx.restype = getattr(
+        wintypes, "BOOL", ctypes.c_int
+    )
+    return windows, kernel, wintypes
+
+
+def open_windows_resource(path: Path, *, directory: bool) -> int:
+    """Pin every Windows path component, rejecting links and reparse points."""
+    import msvcrt
+
+    windows, kernel, wintypes = _windows_api()
+
+    class Attributes(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+    absolute = os.path.abspath(path)
+    anchor = os.path.splitdrive(absolute)[0] + os.sep
+    components: list[str] = []
+    current = anchor
+    components.append(current)
+    for part in absolute[len(anchor) :].split(os.sep):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        components.append(current)
+    handles: list[int] = []
+    try:
+        for index, component in enumerate(components):
+            is_directory = index < len(components) - 1 or directory
+            attributes = 0x02000000 | (0x00200000 if is_directory else 0)
+            handle = kernel.CreateFileW(
+                str(component), 0x80, 0x3, None, 3, attributes, None
+            )
+            if handle == ctypes.c_void_p(-1).value:
+                raise windows.WinError(windows.get_last_error())
+            handles.append(handle)
+            info = Attributes()
+            if not kernel.GetFileInformationByHandleEx(
+                handle, 9, ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                raise windows.WinError(windows.get_last_error())
+            if info.attributes & 0x400:
+                raise OSError(f"Refusing resource reparse point: {component}")
+            if is_directory and not info.attributes & 0x10:
+                raise OSError(f"Resource directory is not a directory: {component}")
+            if not is_directory and not info.attributes & 0x20:
+                raise OSError(f"Resource is not a regular file: {component}")
+        descriptor: int = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
+            handles.pop(), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+        return descriptor
+    finally:
+        for handle in reversed(handles):
+            kernel.CloseHandle(handle)
+
+
+def _open_directory(path: str | Path) -> int:
+    """Open one directory without following a final symbolic link."""
+    if os.stat not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("Secure DOCX publication is not supported on this platform")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(f"Resource is not a directory: {path}")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
 
 
 def _open_parent(path: Path) -> int:
     """Open/create each directory without following untrusted symbolic links."""
     required = (os.open, os.mkdir, os.stat, os.rename, os.link, os.unlink, os.rmdir)
-    if not all(func in os.supports_dir_fd for func in required) or not hasattr(
+    if not all(function in os.supports_dir_fd for function in required) or not hasattr(
         os, "O_NOFOLLOW"
     ):
         raise OSError("Secure DOCX publication is not supported on this platform")
-
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     absolute = path.absolute()
-    descriptor = os.open(absolute.anchor, flags)
+    descriptor = _open_directory(absolute.anchor)
     root = os.fstat(descriptor)
     components = list(absolute.parts[1:])
     followed_links = 0
@@ -183,31 +281,8 @@ def _windows_output(destination: Path, *, overwrite: bool) -> Iterator[Path]:
     while path-based writing and publication are in progress.
     """
     import ctypes
-    from typing import Any, cast
 
-    windows = cast(Any, ctypes)
-    from ctypes import wintypes
-
-    kernel = windows.WinDLL("kernel32", use_last_error=True)
-    kernel.CreateFileW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    ]
-    kernel.CreateFileW.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.CloseHandle.restype = wintypes.BOOL
-    kernel.GetFileInformationByHandleEx.argtypes = [
-        wintypes.HANDLE,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-    ]
-    kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    windows, kernel, wintypes = _windows_api()
 
     class Attributes(ctypes.Structure):
         _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]

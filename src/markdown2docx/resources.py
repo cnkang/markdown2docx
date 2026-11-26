@@ -33,35 +33,32 @@ def _lexical_paths(root: Path, path: Path) -> tuple[Path, Path]:
 
 
 def _open_restricted_parent(root: Path, candidate: Path) -> tuple[int, str]:
-    """Open a POSIX candidate's parent component by component without following links."""
+    """Open the pinned document root, then candidate parents without following links."""
+    from .output import _open_parent
+
     if root.anchor != candidate.anchor:
         raise _outside_resource_directory()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     components = candidate.relative_to(root).parts
     descriptor: int | None = None
-    component = ""
     try:
-        descriptor = os.open(root.anchor, flags)
-        for component in root.parts[1:] + components[:-1]:
-            child = os.open(component, flags, dir_fd=descriptor)
+        descriptor = _open_parent(root)
+        for component in components[:-1]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except OSError as error:
+                entry = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISLNK(entry.st_mode):
+                    raise ConversionError(
+                        "", "Image resource contains a symbolic link"
+                    ) from error
+                raise
             os.close(descriptor)
             descriptor = child
         if descriptor is None:
             raise ConversionError("", "Unable to validate image resource safely")
         return descriptor, components[-1]
     except OSError as exc:
-        entry = None
-        if descriptor is not None and component:
-            try:
-                entry = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
-            except OSError:
-                pass
-        if entry is not None and stat.S_ISLNK(entry.st_mode):
-            if descriptor is not None:
-                os.close(descriptor)
-            raise ConversionError(
-                "", "Image resource contains a symbolic link"
-            ) from exc
         if descriptor is not None:
             os.close(descriptor)
         if isinstance(exc, FileNotFoundError):
@@ -74,7 +71,22 @@ def _open_restricted_parent(root: Path, candidate: Path) -> tuple[int, str]:
 def _validate_restricted_image(root: Path, path: Path) -> str:
     normalized_root, candidate = _lexical_paths(root, path)
     if os.name == "nt":
-        # Windows keeps its trusted-directory semantics after the lexical boundary check.
+        from .output import open_windows_resource
+
+        try:
+            descriptor = open_windows_resource(candidate, directory=False)
+        except FileNotFoundError as exc:
+            raise ConversionError("", "Image resource does not exist") from exc
+        except OSError as exc:
+            if "reparse point" in str(exc):
+                raise ConversionError(
+                    "", "Image resource contains a reparse point"
+                ) from exc
+            raise ConversionError(
+                "", "Unable to validate image resource safely"
+            ) from exc
+        else:
+            os.close(descriptor)
         return str(candidate)
     if not all(hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")):
         raise ConversionError("", "Secure resource validation is unavailable")
@@ -162,8 +174,21 @@ def stage_local_resources(
             source = source if source.is_absolute() else root / source
             path = destination / (uuid.uuid4().hex + source.suffix)
             if os.name == "nt":
-                # Resource restriction is a policy check, not a Windows filesystem sandbox.
-                original = source.open("rb")
+                from .output import open_windows_resource
+
+                try:
+                    descriptor = open_windows_resource(source, directory=False)
+                except FileNotFoundError as exc:
+                    raise ConversionError("", "Image resource does not exist") from exc
+                except OSError as exc:
+                    if "reparse point" in str(exc):
+                        raise ConversionError(
+                            "", "Image resource contains a reparse point"
+                        ) from exc
+                    raise ConversionError(
+                        "", "Unable to stage image resource safely"
+                    ) from exc
+                original = os.fdopen(descriptor, "rb")
             else:
                 parent = _open_parent(source.parent)
                 try:
