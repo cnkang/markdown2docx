@@ -510,7 +510,7 @@ def _preflight_tar(path: Path) -> None:
                         "TAR exceeds the total declared size limit: "
                         f"{declared_bytes} > {MAX_TAR_DECLARED_BYTES}"
                     )
-                if header[156:157] in {b"x", b"g", b"L", b"K"}:
+                if header[156:157] in {b"x", b"g", b"L", b"K", b"X"}:
                     extension_headers += 1
                     extension_bytes += size
                     if extension_headers > MAX_TAR_EXTENSION_HEADERS:
