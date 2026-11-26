@@ -71,8 +71,9 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
         for index, component in enumerate(components):
             is_directory = index < len(components) - 1 or directory
             attributes = 0x02000000 | (0x00200000 if is_directory else 0)
+            access = 0x80 if is_directory else 0x80000000
             handle = kernel.CreateFileW(
-                str(component), 0x80, 0x3, None, 3, attributes, None
+                str(component), access, 0x3, None, 3, attributes, None
             )
             if handle == ctypes.c_void_p(-1).value:
                 raise windows.WinError(windows.get_last_error())

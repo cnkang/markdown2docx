@@ -41,6 +41,7 @@ def _open_restricted_parent(root: Path, candidate: Path) -> tuple[int, str]:
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     components = candidate.relative_to(root).parts
     descriptor: int | None = None
+    succeeded = False
     try:
         descriptor = _open_parent(root)
         for component in components[:-1]:
@@ -57,15 +58,18 @@ def _open_restricted_parent(root: Path, candidate: Path) -> tuple[int, str]:
             descriptor = child
         if descriptor is None:
             raise ConversionError("", "Unable to validate image resource safely")
-        return descriptor, components[-1]
+        result = descriptor, components[-1]
+        succeeded = True
+        return result
     except OSError as exc:
-        if descriptor is not None:
-            os.close(descriptor)
         if isinstance(exc, FileNotFoundError):
             raise ConversionError("", "Image resource does not exist") from exc
         if isinstance(exc, NotADirectoryError):
             raise _outside_resource_directory() from exc
         raise ConversionError("", "Unable to validate image resource safely") from exc
+    finally:
+        if not succeeded and descriptor is not None:
+            os.close(descriptor)
 
 
 def _validate_restricted_image(root: Path, path: Path) -> str:
