@@ -5,6 +5,7 @@ import argparse
 import base64
 import configparser
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -13,6 +14,7 @@ import re
 import shutil
 import signal
 import stat
+import struct
 import subprocess  # nosec B404
 import sys
 import tarfile
@@ -20,8 +22,8 @@ import tempfile
 import tomllib
 import unicodedata
 import zipfile
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from email.parser import BytesParser
 from email.policy import default
@@ -39,11 +41,17 @@ READ_CHUNK_SIZE = 1024 * 1024
 PROCESS_TERMINATION_TIMEOUT = 5
 MAX_WHEEL_BYTES = 64 * 1024 * 1024
 MAX_WHEEL_MEMBERS = 10_000
+MAX_WHEEL_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
 MAX_WHEEL_MEMBER_BYTES = 32 * 1024 * 1024
 MAX_WHEEL_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_SDIST_MEMBERS = 10_000
 MAX_SDIST_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_SDIST_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_TAR_EXTENSION_HEADERS = 128
+MAX_TAR_EXTENSION_MEMBER_BYTES = 8 * 1024 * 1024
+MAX_TAR_EXTENSION_BYTES = 32 * 1024 * 1024
+MAX_TAR_PHYSICAL_HEADERS = 20_000
+MAX_TAR_DECLARED_BYTES = 320 * 1024 * 1024
 WINDOWS_DEVICE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
@@ -288,7 +296,7 @@ class _ArchiveInventory:
                 key = (parent, *alias_key)
                 candidates = self.long_name_index.get(key, set())
                 if candidates - {original_part}:
-                    candidate = sorted(candidates - {original_part})[0]
+                    candidate = next(iter(candidates - {original_part}))
                     raise DistributionError(
                         f"Potential Windows 8.3 alias collision: "
                         f"{original_part!r} and {candidate!r}"
@@ -301,7 +309,7 @@ class _ArchiveInventory:
             key = (parent, *long_key)
             aliases = self.alias_index.get(key, set())
             if aliases - {original_part}:
-                alias = sorted(aliases - {original_part})[0]
+                alias = next(iter(aliases - {original_part}))
                 raise DistributionError(
                     f"Potential Windows 8.3 alias collision: "
                     f"{alias!r} and {original_part!r}"
@@ -338,19 +346,79 @@ def _read_stream_bounded(stream: BinaryIO, max_bytes: int, label: str) -> bytes:
     return b"".join(chunks)
 
 
+def _preflight_zip(path: Path) -> None:
+    _require_artifact(path, "wheel")
+    try:
+        physical_size = path.stat().st_size
+        if physical_size > MAX_WHEEL_BYTES:
+            raise DistributionError(
+                f"Wheel exceeds the physical archive size limit: {path}"
+            )
+        if physical_size < 22:
+            raise DistributionError("Invalid wheel ZIP: missing its EOCD record")
+        with path.open("rb") as stream:
+            stream.seek(-min(physical_size, 22 + 65535), os.SEEK_END)
+            tail = stream.read()
+    except OSError as error:
+        raise DistributionError(
+            f"Unable to preflight wheel ZIP {path}: {error}"
+        ) from error
+    eocd_position = None
+    search_end = len(tail)
+    while True:
+        index = tail.rfind(b"PK\x05\x06", 0, search_end)
+        if index < 0:
+            break
+        if index + 22 <= len(tail):
+            comment_length = struct.unpack_from("<H", tail, index + 20)[0]
+            if index + 22 + comment_length == len(tail):
+                eocd_position = index
+                break
+        search_end = index
+    if eocd_position is None:
+        raise DistributionError("Wheel ZIP is missing a valid EOCD record")
+    try:
+        (
+            signature,
+            disk_number,
+            directory_disk,
+            disk_entries,
+            total_entries,
+            directory_size,
+            directory_offset,
+            comment_length,
+        ) = struct.unpack_from("<4s4H2LH", tail, eocd_position)
+    except struct.error as error:
+        raise DistributionError("Wheel ZIP EOCD record is truncated") from error
+    if signature != b"PK\x05\x06" or comment_length != len(tail) - eocd_position - 22:
+        raise DistributionError("Wheel ZIP EOCD record is invalid")
+    if 0xFFFF in {disk_entries, total_entries} or 0xFFFFFFFF in {
+        directory_size,
+        directory_offset,
+    }:
+        raise DistributionError("ZIP64 wheels are not supported")
+    if disk_number != 0 or directory_disk != 0 or disk_entries != total_entries:
+        raise DistributionError("Multi-disk ZIP wheels are not supported")
+    if total_entries > MAX_WHEEL_MEMBERS:
+        raise DistributionError(
+            f"Wheel exceeds the central-directory entry count limit: "
+            f"{total_entries} > {MAX_WHEEL_MEMBERS}"
+        )
+    if directory_size > MAX_WHEEL_CENTRAL_DIRECTORY_BYTES:
+        raise DistributionError(
+            "Wheel exceeds the central-directory size limit: "
+            f"{directory_size} > {MAX_WHEEL_CENTRAL_DIRECTORY_BYTES}"
+        )
+    eocd_offset = physical_size - len(tail) + eocd_position
+    if directory_offset + directory_size > eocd_offset:
+        raise DistributionError("Wheel ZIP central directory lies outside the archive")
+
+
 def _read_wheel(path: Path) -> dict[str, bytes]:
     _require_artifact(path, "wheel")
     if path.suffix != ".whl":
         raise DistributionError(f"Expected a .whl artifact: {path}")
-    try:
-        if path.stat().st_size > MAX_WHEEL_BYTES:
-            raise DistributionError(
-                f"Wheel exceeds the physical archive size limit: {path}"
-            )
-    except OSError as error:
-        raise DistributionError(
-            f"Unable to stat wheel archive {path}: {error}"
-        ) from error
+    _preflight_zip(path)
     files = {}
     inventory = _ArchiveInventory(
         "Wheel",
@@ -386,6 +454,114 @@ def _read_wheel(path: Path) -> dict[str, bytes]:
     return files
 
 
+def _tar_header_size(header: bytes) -> int:
+    field = header[124:136]
+    if field[0] & 0x80:
+        if field[0] == 0xFF:
+            raise DistributionError("TAR header declares a negative member size")
+        return int.from_bytes(bytes([field[0] & 0x7F]) + field[1:], "big")
+    encoded = field.strip(b"\x00 ")
+    if not encoded:
+        return 0
+    try:
+        size = int(encoded, 8)
+    except ValueError as error:
+        raise DistributionError("TAR header has an invalid member size") from error
+    if size < 0:
+        raise DistributionError("TAR header declares a negative member size")
+    return size
+
+
+def _preflight_tar(path: Path) -> None:
+    _require_artifact(path, "sdist")
+    physical_headers = 0
+    extension_headers = 0
+    extension_bytes = 0
+    declared_bytes = 0
+    try:
+        with gzip.open(path, "rb") as stream:
+            while True:
+                header = stream.read(512)
+                if not header:
+                    break
+                if len(header) != 512:
+                    raise DistributionError("TAR contains a truncated physical header")
+                if header == b"\0" * 512:
+                    break
+                physical_headers += 1
+                if physical_headers > MAX_TAR_PHYSICAL_HEADERS:
+                    raise DistributionError(
+                        "TAR exceeds the physical header count limit: "
+                        f"{physical_headers} > {MAX_TAR_PHYSICAL_HEADERS}"
+                    )
+                stored_checksum = header[148:156].strip(b"\x00 ")
+                try:
+                    expected_checksum = int(stored_checksum, 8)
+                except ValueError as error:
+                    raise DistributionError("TAR header checksum is invalid") from error
+                actual_checksum = sum(header[:148]) + 8 * ord(" ") + sum(header[156:])
+                if expected_checksum != actual_checksum:
+                    raise DistributionError("TAR header checksum mismatch")
+                size = _tar_header_size(header)
+                declared_bytes += size
+                if declared_bytes > MAX_TAR_DECLARED_BYTES:
+                    raise DistributionError(
+                        "TAR exceeds the total declared size limit: "
+                        f"{declared_bytes} > {MAX_TAR_DECLARED_BYTES}"
+                    )
+                if header[156:157] in {b"x", b"g", b"L", b"K"}:
+                    extension_headers += 1
+                    extension_bytes += size
+                    if extension_headers > MAX_TAR_EXTENSION_HEADERS:
+                        raise DistributionError(
+                            "TAR exceeds the extension-header count limit"
+                        )
+                    if size > MAX_TAR_EXTENSION_MEMBER_BYTES:
+                        raise DistributionError(
+                            "TAR extension header exceeds the single-header size limit"
+                        )
+                    if extension_bytes > MAX_TAR_EXTENSION_BYTES:
+                        raise DistributionError(
+                            "TAR exceeds the total extension-header size limit"
+                        )
+                stream.seek((size + 511) // 512 * 512, os.SEEK_CUR)
+    except DistributionError:
+        raise
+    except (EOFError, OSError, gzip.BadGzipFile) as error:
+        raise DistributionError(
+            f"Unable to preflight TAR archive {path}: {error}"
+        ) from error
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(READ_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@contextmanager
+def _sdist_snapshot(path: Path) -> Iterator[tuple[Path, str]]:
+    with tempfile.TemporaryDirectory(prefix="md2docx-sdist-snapshot-") as directory:
+        root = Path(directory)
+        root.chmod(0o700)
+        snapshot = root / path.name
+        digest = hashlib.sha256()
+        with path.open("rb") as source, snapshot.open("xb") as target:
+            while chunk := source.read(READ_CHUNK_SIZE):
+                target.write(chunk)
+                digest.update(chunk)
+        expected_hash = digest.hexdigest()
+        _verify_sdist_snapshot(snapshot, expected_hash)
+        yield snapshot, expected_hash
+
+
+def _verify_sdist_snapshot(snapshot: Path, expected_hash: str) -> None:
+    if _sha256_file(snapshot) != expected_hash:
+        raise DistributionError("Sdist snapshot hash verification failed")
+
+
 def _read_sdist(path: Path) -> dict[str, bytes]:
     _require_artifact(path, "sdist")
     if not path.name.endswith(".tar.gz"):
@@ -398,23 +574,28 @@ def _read_sdist(path: Path) -> dict[str, bytes]:
         MAX_SDIST_UNCOMPRESSED_BYTES,
     )
     try:
-        with tarfile.open(path, "r:gz") as archive:
-            for member in archive:
-                identity = inventory.add(
-                    member.name, member.size, is_dir=member.isdir()
-                )
-                if not (member.isfile() or member.isdir()):
-                    raise DistributionError(f"Unsafe sdist member type: {member.name}")
-                if member.isfile():
-                    source = archive.extractfile(member)
-                    if source is None:
+        with _sdist_snapshot(path) as (snapshot, snapshot_hash):
+            _preflight_tar(snapshot)
+            with tarfile.open(snapshot, "r:gz") as archive:
+                for member in archive:
+                    identity = inventory.add(
+                        member.name, member.size, is_dir=member.isdir()
+                    )
+                    if not (member.isfile() or member.isdir()):
                         raise DistributionError(
-                            f"Unable to read sdist member: {member.name}"
+                            f"Unsafe sdist member type: {member.name}"
                         )
-                    with source:
-                        files[identity] = _read_stream_bounded(
-                            source, member.size, f"Sdist member {identity}"
-                        )
+                    if member.isfile():
+                        source = archive.extractfile(member)
+                        if source is None:
+                            raise DistributionError(
+                                f"Unable to read sdist member: {member.name}"
+                            )
+                        with source:
+                            files[identity] = _read_stream_bounded(
+                                source, member.size, f"Sdist member {identity}"
+                            )
+            _verify_sdist_snapshot(snapshot, snapshot_hash)
     except DistributionError:
         raise
     except (EOFError, OSError, tarfile.TarError) as error:
@@ -481,36 +662,50 @@ def _validate_json_asset(data: bytes, name: str, label: str) -> None:
 def _validate_record(files: Mapping[str, bytes], record_path: str) -> None:
     if record_path not in files:
         raise DistributionError(f"Wheel RECORD is missing: {record_path}")
+    recorded = set()
+    row_count = 0
+    self_seen = False
     try:
-        rows = list(
-            csv.reader(io.StringIO(files[record_path].decode("utf-8")), strict=True)
+        reader = csv.reader(
+            io.StringIO(files[record_path].decode("utf-8")), strict=True
         )
+        for row in reader:
+            row_count += 1
+            if row_count > len(files):
+                raise DistributionError(
+                    "Wheel RECORD row count exceeds the wheel member count"
+                )
+            if len(row) != 3:
+                raise DistributionError("Wheel RECORD has an invalid inventory row")
+            name, hash_value, size_value = row
+            if name in recorded:
+                raise DistributionError(f"Wheel RECORD duplicate entry: {name}")
+            if name not in files:
+                raise DistributionError(f"Wheel RECORD unlisted member: {name}")
+            recorded.add(name)
+            if name == record_path:
+                if hash_value or size_value:
+                    raise DistributionError(
+                        "Wheel RECORD self-entry must have empty hash/size"
+                    )
+                self_seen = True
+                continue
+            data = files[name]
+            expected_hash = "sha256=" + base64.urlsafe_b64encode(
+                hashlib.sha256(data).digest()
+            ).rstrip(b"=").decode("ascii")
+            if hash_value != expected_hash:
+                raise DistributionError(f"Wheel RECORD SHA-256 mismatch: {name}")
+            if not size_value.isascii() or not size_value.isdigit():
+                raise DistributionError(f"Wheel RECORD size is invalid: {name}")
+            if size_value != str(len(data)):
+                raise DistributionError(f"Wheel RECORD size mismatch: {name}")
+    except DistributionError:
+        raise
     except (UnicodeDecodeError, csv.Error) as error:
         raise DistributionError(f"Wheel RECORD is invalid: {error}") from error
-    if rows and rows[0] == ["path", "hash", "size"]:
-        rows = rows[1:]
-    if not rows or any(len(row) != 3 for row in rows):
-        raise DistributionError("Wheel RECORD has invalid inventory rows")
-    recorded = [row[0] for row in rows]
-    if len(recorded) != len(set(recorded)) or set(recorded) != set(files):
+    if not self_seen or recorded != set(files):
         raise DistributionError("Wheel RECORD does not match the wheel inventory")
-    for name, hash_value, size_value in rows:
-        if name == record_path:
-            if hash_value or size_value:
-                raise DistributionError(
-                    "Wheel RECORD self-entry must have empty hash/size"
-                )
-            continue
-        data = files[name]
-        expected_hash = "sha256=" + base64.urlsafe_b64encode(
-            hashlib.sha256(data).digest()
-        ).rstrip(b"=").decode("ascii")
-        if hash_value != expected_hash:
-            raise DistributionError(f"Wheel RECORD SHA-256 mismatch: {name}")
-        if not size_value.isascii() or not size_value.isdigit():
-            raise DistributionError(f"Wheel RECORD size is invalid: {name}")
-        if int(size_value) != len(data):
-            raise DistributionError(f"Wheel RECORD size mismatch: {name}")
 
 
 def validate_wheel(path: Path, expected_version: str) -> WheelInfo:
@@ -718,6 +913,7 @@ def _verify_extracted_sdist_content(
 def _scan_sdist_archive(
     path: Path,
 ) -> tuple[str, dict[str, tuple[int, str]]]:
+    _preflight_tar(path)
     inventory = _ArchiveInventory(
         "Sdist",
         MAX_SDIST_MEMBERS,
@@ -749,25 +945,28 @@ def extract_sdist(path: Path, destination: Path) -> Path:
         raise DistributionError(f"Expected a .tar.gz sdist artifact: {path}")
     destination = Path(destination)
     try:
-        root_name, expected_contents = _scan_sdist_archive(path)
-        root = destination / root_name
-        if root.exists() or root.is_symlink():
-            raise DistributionError(
-                f"Sdist extraction destination already exists: {root}"
-            )
-        destination.mkdir(parents=True, exist_ok=True)
-        if root.resolve().parent != destination.resolve():
-            raise DistributionError(
-                f"Sdist extraction root resolves outside its destination: {root}"
-            )
-        with tarfile.open(path, "r:gz") as archive:
-            # The first pass bounded every member; data_filter rejects unsafe metadata.
-            archive.extractall(  # nosec B202
-                path=destination, filter=tarfile.data_filter
-            )
-        if not root.is_dir() or root.is_symlink():
-            raise DistributionError(f"Sdist extraction root is invalid: {root}")
-        _verify_extracted_sdist_content(root, expected_contents)
+        with _sdist_snapshot(path) as (snapshot, snapshot_hash):
+            root_name, expected_contents = _scan_sdist_archive(snapshot)
+            _verify_sdist_snapshot(snapshot, snapshot_hash)
+            root = destination / root_name
+            if root.exists() or root.is_symlink():
+                raise DistributionError(
+                    f"Sdist extraction destination already exists: {root}"
+                )
+            destination.mkdir(parents=True, exist_ok=True)
+            if root.resolve().parent != destination.resolve():
+                raise DistributionError(
+                    f"Sdist extraction root resolves outside its destination: {root}"
+                )
+            with tarfile.open(snapshot, "r:gz") as archive:
+                # The snapshot was bounded; data_filter rejects unsafe metadata.
+                archive.extractall(  # nosec B202
+                    path=destination, filter=tarfile.data_filter
+                )
+            if not root.is_dir() or root.is_symlink():
+                raise DistributionError(f"Sdist extraction root is invalid: {root}")
+            _verify_extracted_sdist_content(root, expected_contents)
+            _verify_sdist_snapshot(snapshot, snapshot_hash)
     except DistributionError:
         raise
     except (EOFError, OSError, tarfile.TarError) as error:
