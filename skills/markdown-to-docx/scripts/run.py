@@ -7,7 +7,7 @@ import shutil
 import subprocess  # nosec B404
 import sys
 
-EXECUTION_REVISION = "bac6731231a38f9873fd1dfeba02ce1c8a448a76"
+EXECUTION_REVISION = "1b01b2c46b5fe20329f9487977c1f1be89a8cc40"
 SOURCE = f"git+https://github.com/cnkang/markdown2docx.git@{EXECUTION_REVISION}"
 
 
