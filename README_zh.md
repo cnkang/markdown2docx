@@ -150,7 +150,21 @@ Actions 在 Linux、macOS、Windows 上执行转换和检查。临时 Linux runn
 
 显式指定不存在的配置文件、未知配置键、错误类型和越界值会在转换前失败。每个转换器持有独立的配置快照。`pandoc.timeout_seconds` 分别限制解析、参考模板提取和 DOCX 写出阶段；超时使用 `PANDOC_TIMEOUT`，保留已有 DOCX。字体下载的读取时限为 60 秒、缓存锁等待为 120 秒；LibreOffice 与页面栅格化各有 120 秒时限。当前不提供整个任务共享的总时限。
 
-`--offline` 仅禁止字体下载。`--resources-offline` 另外拒绝远程图片；`--restricted` 限制图片位于输入文档目录内，将图片复制到私有转换目录，并禁止 raw 内容与任意过滤器/defaults 参数。它是资源使用策略，不能替代操作系统沙箱；Windows 图片复制仍依赖调用方对本地文件目录的信任。可信 API 调用方可在普通模式下使用明确的 Pandoc 扩展参数，输入/输出格式与模板保留参数始终禁止覆盖。
+`--offline` 仅禁止**字体**下载，不限制文档资源。`--resources-offline` 拒绝远程图片；`--restricted` 还会限制图片位于输入文档目录内，将图片复制到私有转换目录，并禁止 raw 内容与任意过滤器/defaults 参数。字体 offline 与资源 offline 是相互独立的策略，可以分别配置。
+
+处理来源不可信的 Markdown 时，请使用 `--untrusted`、`converter.convert_untrusted(...)`、`converter.convert_untrusted_with_report(...)`，或包级 `convert_untrusted(...)` / `convert_untrusted_with_report(...)` 辅助函数：
+
+```bash
+uv run markdown2docx input.md --untrusted --json
+```
+
+```python
+from markdown2docx import convert_untrusted_with_report
+
+report = convert_untrusted_with_report("input.md", "output.docx")
+```
+
+不可信入口始终强制 `restricted=True`、`resources_offline=True` 和 `offline=True`，调用参数或配置不能削弱这些设置。策略拒绝时退出码为 1；配合 `--json` 返回稳定的 `CONVERSION_FAILED` JSON 错误，且不发布 DOCX。普通 `convert()` / `convert_with_report()` 保留可信调用方语义，包括显式使用 Pandoc 扩展。该策略不能替代操作系统沙箱；Windows 图片复制仍依赖调用方对本地文件目录的信任。输入/输出格式与模板保留参数始终禁止覆盖。
 
 可通过 `[limits]` 配置 `input_bytes`（默认 64 MiB）、`archive_bytes`（512 MiB）、`archive_entries`（10000）、`xml_bytes`（64 MiB）与 `preview_pages`（200）。超过限额会明确失败，不截断正文。`conversion.create_backup=true` 暂不支持，会明确报错；请显式保存历史输出。`logging.file_path` 可设置 CLI 日志文件。必要完整性检查始终执行。
 

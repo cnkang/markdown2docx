@@ -150,7 +150,21 @@ Project code: MIT. Downloaded fonts retain their own OFL licenses; they are not 
 
 Explicit missing configuration files, unknown keys, wrong types and out-of-range values fail before conversion. Each converter owns a configuration snapshot. `pandoc.timeout_seconds` applies separately to parsing, reference extraction and DOCX writing; timeouts return `PANDOC_TIMEOUT` and preserve existing DOCX output. Font download reads use 60-second timeouts and cache locks wait up to 120 seconds. LibreOffice and rasterization each have 120-second timeouts. There is currently no shared end-to-end deadline.
 
-`--offline` disables font downloads. `--resources-offline` additionally rejects remote images. `--restricted` limits local images to the input document directory, stages their bytes privately, and rejects raw content and arbitrary filter/defaults options. This policy does not replace an operating-system sandbox; Windows image staging still relies on the caller trusting its local directories. Trusted API callers may use Pandoc extensions in ordinary mode; reserved format/output/template arguments cannot override the pipeline.
+`--offline` disables **font** downloads only; it does not restrict document resources. `--resources-offline` rejects remote images. `--restricted` also limits local images to the input document directory, stages their bytes privately, and rejects raw content and arbitrary filter/defaults options. Font offline and resource offline are independent policies and may be configured separately.
+
+For Markdown from an untrusted source, use `--untrusted`, `converter.convert_untrusted(...)`, `converter.convert_untrusted_with_report(...)`, or the package-level `convert_untrusted(...)` / `convert_untrusted_with_report(...)` helpers:
+
+```bash
+uv run markdown2docx input.md --untrusted --json
+```
+
+```python
+from markdown2docx import convert_untrusted_with_report
+
+report = convert_untrusted_with_report("input.md", "output.docx")
+```
+
+The untrusted entry point always forces `restricted=True`, `resources_offline=True` and `offline=True`; caller arguments or configuration cannot weaken these settings. Policy failures return exit code 1 and a stable JSON `CONVERSION_FAILED` error under `--json`, without publishing a DOCX. Ordinary `convert()` / `convert_with_report()` retain their trusted-caller semantics, including explicit Pandoc extensions. This policy does not replace an operating-system sandbox; Windows image staging still relies on the caller trusting its local directories. Reserved format/output/template arguments cannot override any conversion pipeline.
 
 The `[limits]` section supports `input_bytes` (64 MiB), `archive_bytes` (512 MiB), `archive_entries` (10000), `xml_bytes` (64 MiB), and `preview_pages` (200). Exceeding a limit fails explicitly without truncating content. `conversion.create_backup=true` is unsupported and now fails explicitly; retain historical copies separately. `logging.file_path` configures a CLI log file. Required integrity checks always run.
 

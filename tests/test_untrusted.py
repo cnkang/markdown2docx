@@ -24,6 +24,7 @@ def untrusted_converter(tmp_path):
 
 
 def parse_ast(tmp_path, markdown):
+    (tmp_path.parent / "outside.png").write_bytes(b"image")
     source = tmp_path / "input.md"
     source.write_text(markdown, encoding="utf-8")
     parsed = subprocess.run(
@@ -41,6 +42,27 @@ def parse_ast(tmp_path, markdown):
         timeout=30,
     )
     return json.loads(parsed.stdout)
+
+
+@pytest.mark.parametrize(
+    "entry", ["convert_untrusted", "convert_untrusted_with_report"]
+)
+def test_package_untrusted_entry_points_forward_to_converter(entry, tmp_path):
+    source = tmp_path / "input.md"
+    source.write_text("Safe text", encoding="utf-8")
+    output = tmp_path / "output.docx"
+    report = Mock(output_path=str(output), warnings=[])
+    with patch("markdown2docx.MarkdownToDocxConverter") as converter_class:
+        converter = converter_class.return_value
+        getattr(converter, entry).return_value = (
+            output if entry == "convert_untrusted" else report
+        )
+
+        result = getattr(markdown2docx, entry)(source, output)
+
+    converter_class.assert_called_once_with()
+    getattr(converter, entry).assert_called_once_with(source, output)
+    assert result == (output if entry == "convert_untrusted" else report)
 
 
 def test_untrusted_entry_points_are_public():
