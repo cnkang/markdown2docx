@@ -1,8 +1,10 @@
 """Default-safe conversion for Markdown whose caller is not trusted."""
 
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -12,6 +14,7 @@ from markdown2docx import MarkdownToDocxConverter
 from markdown2docx.cli import handle_conversion
 from markdown2docx.config import MarkdownToDocxConfig
 from markdown2docx.exceptions import ConversionError
+from markdown2docx.resources import validate_resources
 
 
 def untrusted_converter(tmp_path):
@@ -23,9 +26,8 @@ def untrusted_converter(tmp_path):
         return MarkdownToDocxConverter(config=config)
 
 
-def parse_ast(tmp_path, markdown):
-    (tmp_path.parent / "outside.png").write_bytes(b"image")
-    source = tmp_path / "input.md"
+def parse_ast(directory, markdown):
+    source = directory / "input.md"
     source.write_text(markdown, encoding="utf-8")
     parsed = subprocess.run(
         [
@@ -76,24 +78,40 @@ def test_untrusted_entry_points_are_public():
     "entry", ["convert_untrusted", "convert_untrusted_with_report"]
 )
 @pytest.mark.parametrize(
-    ("markdown", "message"),
+    ("location", "message"),
     [
-        ("![remote](https://example.com/image.png)", "Remote images"),
-        ("![remote](http://example.com/image.png)", "Remote images"),
-        ("![local](../outside.png)", "outside the document"),
-        ("![local](file:///outside.png)", "outside the document"),
-        ("<script>alert(1)</script>", "Raw content"),
-        ("text <script>alert(1)</script>", "Raw content"),
+        ("https://example.com/image.png", "Remote images"),
+        ("http://example.com/image.png", "Remote images"),
+        ("{relative}", "outside the document"),
+        ("{outside}", "outside the document"),
+        ("{missing}", "Image resource does not exist"),
+        ("{raw_block}", "Raw content"),
+        ("{raw_inline}", "Raw content"),
     ],
 )
 def test_untrusted_entry_rejects_unsafe_content_before_processing(
-    tmp_path, entry, markdown, message
+    tmp_path, entry, location, message
 ):
-    converter = untrusted_converter(tmp_path)
-    source = tmp_path / "input.md"
+    document = tmp_path / entry
+    document.mkdir()
+    outside = document.parent / f"{entry}-outside.png"
+    outside.write_bytes(b"image")
+    if location.startswith("https://") or location.startswith("http://"):
+        markdown = f"![remote]({location})"
+    elif location in {"{relative}", "{outside}"}:
+        target = "../outside.png" if location == "{relative}" else outside.as_uri()
+        markdown = f"![local]({target})"
+    elif location == "{missing}":
+        markdown = f"![local]({(document / 'missing.png').as_uri()})"
+    elif location == "{raw_block}":
+        markdown = "<script>alert(1)</script>"
+    else:
+        markdown = "text <script>alert(1)</script>"
+    converter = untrusted_converter(document)
+    source = document / "input.md"
     source.write_text(markdown, encoding="utf-8")
-    output = tmp_path / "output.docx"
-    ast = parse_ast(tmp_path, markdown)
+    output = document / "output.docx"
+    ast = parse_ast(document, markdown)
     original_validate_resources = markdown2docx.converter.validate_resources
 
     def validate_then_fail_fast(*args, **kwargs):
@@ -126,6 +144,64 @@ def test_untrusted_entry_rejects_unsafe_content_before_processing(
     templates.assert_not_called()
     writer.assert_not_called()
     assert not output.exists()
+
+
+def image_ast(location):
+    return {"t": "Image", "c": [["", [], []], [], [location, ""]]}
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "../outside.png",
+        "sub/../../outside.png",
+        "file:///outside.png",
+        "file://localhost/outside.png",
+        "file://server/share/outside.png",
+    ],
+)
+def test_lexical_escapes_fail_before_path_resolution(tmp_path, location):
+    document = tmp_path / "document"
+    document.mkdir()
+    ast = image_ast(location)
+
+    with (
+        patch.object(Path, "resolve", side_effect=AssertionError("resolve called")),
+        pytest.raises(
+            ConversionError,
+            match="outside the document|Remote images",
+        ),
+    ):
+        validate_resources(ast, document, offline=False, restricted=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow directory validation")
+def test_symlink_escape_does_not_touch_external_canary(tmp_path):
+    document = tmp_path / "document"
+    document.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    canary = outside / "canary.png"
+    canary.write_bytes(b"external canary")
+    link = document / "escape"
+    link.symlink_to(outside, target_is_directory=True)
+    ast = image_ast("escape/canary.png")
+    accesses = []
+    original_open = os.open
+
+    def record_open(path, flags, *args, **kwargs):
+        accesses.append((os.fspath(path), flags))
+        return original_open(path, flags, *args, **kwargs)
+
+    with (
+        patch("os.open", side_effect=record_open),
+        pytest.raises(ConversionError, match="symbolic link"),
+    ):
+        validate_resources(ast, document, offline=False, restricted=True)
+
+    assert canary.read_bytes() == b"external canary"
+    assert not any("canary.png" in path for path, _ in accesses)
+    assert any(path == "escape" and flags & os.O_NOFOLLOW for path, flags in accesses)
 
 
 @pytest.mark.parametrize(
