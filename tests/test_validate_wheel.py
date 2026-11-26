@@ -1,11 +1,14 @@
 """Synthetic wheel and sdist contracts for the release distribution validator."""
 
 import base64
+import csv
+import gzip
 import hashlib
 import importlib.util
 import io
 import json
 import os
+import struct
 import subprocess
 import sys
 import tarfile
@@ -86,16 +89,13 @@ def record_hash(data):
 
 
 def record_contents(files):
-    rows = ["path,hash,size"]
-    rows.extend(
-        f"{name},{record_hash(data)},{len(data)}" for name, data in files.items()
-    )
+    rows = [f"{name},{record_hash(data)},{len(data)}" for name, data in files.items()]
     rows.append(f"{DIST_INFO}/RECORD,,")
     return "\n".join(rows).encode() + b"\n"
 
 
 def record_with_fields(files, target, hash_value, size_value):
-    rows = ["path,hash,size"]
+    rows = []
     for name, data in files.items():
         if name == target:
             rows.append(f"{name},{hash_value},{size_value}")
@@ -170,6 +170,47 @@ def file_member(name, data=b"payload"):
     member = tarfile.TarInfo(name)
     member.size = len(data)
     return member, data
+
+
+def raw_tar_header(name, size=0, typeflag=b"0"):
+    header = bytearray(512)
+    encoded_name = name.encode("utf-8")
+    header[: len(encoded_name)] = encoded_name
+    header[124:136] = f"{size:011o}\0".encode("ascii")
+    header[148:156] = b"        "
+    header[156:157] = typeflag
+    checksum = sum(header)
+    header[148:156] = f"{checksum:06o}\0 ".encode("ascii")
+    return bytes(header)
+
+
+def write_raw_tar(directory, headers):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{SDIST_ROOT}.tar.gz"
+    with gzip.open(path, "wb") as archive:
+        for name, size, typeflag in headers:
+            archive.write(raw_tar_header(name, size, typeflag))
+            archive.write(b"x" * size)
+            archive.write(b"\0" * (-size % 512))
+        archive.write(b"\0" * 1024)
+    return path
+
+
+def zip_eocd(entries=0, directory_size=0, directory_offset=0, comment=b""):
+    return (
+        struct.pack(
+            "<4s4H2LH",
+            b"PK\x05\x06",
+            0,
+            0,
+            entries,
+            entries,
+            directory_size,
+            directory_offset,
+            len(comment),
+        )
+        + comment
+    )
 
 
 def write_complete_distribution(directory):
@@ -322,6 +363,49 @@ def test_wheel_rejects_missing_record(validator, tmp_path):
         validator.validate_wheel(wheel, VERSION)
 
 
+def test_record_reader_stops_when_line_count_exceeds_member_count(
+    validator, tmp_path, monkeypatch
+):
+    files = wheel_files()
+    record = record_contents(files) + b"extra-one,,\nextra-two,,\n"
+    wheel = write_wheel(
+        tmp_path,
+        files={**files, f"{DIST_INFO}/RECORD": record},
+        record=False,
+    )
+    original_reader = csv.reader
+    member_count = len(files) + 1
+
+    def guarded_reader(*args, **kwargs):
+        for index, row in enumerate(original_reader(*args, **kwargs)):
+            if index > member_count:
+                raise AssertionError("RECORD reader consumed past the first excess row")
+            yield row
+
+    monkeypatch.setattr(validator.csv, "reader", guarded_reader)
+
+    with pytest.raises(validator.DistributionError, match="RECORD"):
+        validator.validate_wheel(wheel, VERSION)
+
+
+@pytest.mark.parametrize(
+    "size_value",
+    ["9" * 10_000, "+1", "-1", "1.0", "\uff11\uff12", " 1", "1 "],
+)
+def test_record_illegal_sizes_raise_distribution_error(validator, tmp_path, size_value):
+    files = wheel_files()
+    target = f"{PROJECT_NAME}/__init__.py"
+    record = record_with_fields(files, target, record_hash(files[target]), size_value)
+    wheel = write_wheel(
+        tmp_path,
+        files={**files, f"{DIST_INFO}/RECORD": record},
+        record=False,
+    )
+
+    with pytest.raises(validator.DistributionError, match="RECORD.*size"):
+        validator.validate_wheel(wheel, VERSION)
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
@@ -377,6 +461,70 @@ def test_wheel_accepts_exact_archive_resource_limits(validator, tmp_path, monkey
     monkeypatch.setattr(validator, "MAX_WHEEL_UNCOMPRESSED_BYTES", sum(member_sizes))
 
     assert validator.validate_wheel(wheel, VERSION).version == VERSION
+
+
+def test_zip_preflight_accepts_standard_eocd(validator, tmp_path):
+    path = tmp_path / "empty.whl"
+    path.write_bytes(zip_eocd())
+
+    validator._preflight_zip(path)
+
+
+def test_zip_preflight_enforces_entry_count(validator, tmp_path, monkeypatch):
+    path = tmp_path / "entries.whl"
+    path.write_bytes(zip_eocd(entries=2))
+    monkeypatch.setattr(validator, "MAX_WHEEL_MEMBERS", 1)
+
+    with pytest.raises(validator.DistributionError, match="entry count|members|limit"):
+        validator._preflight_zip(path)
+
+
+def test_zip_preflight_enforces_central_directory_size(
+    validator, tmp_path, monkeypatch
+):
+    path = tmp_path / "directory.whl"
+    path.write_bytes(zip_eocd(directory_size=2048))
+    monkeypatch.setattr(validator, "MAX_WHEEL_CENTRAL_DIRECTORY_BYTES", 1024)
+
+    with pytest.raises(validator.DistributionError, match="central directory|limit"):
+        validator._preflight_zip(path)
+
+
+@pytest.mark.parametrize(
+    "eocd",
+    [
+        zip_eocd(entries=0xFFFF),
+        zip_eocd(directory_size=0xFFFFFFFF),
+        zip_eocd(directory_offset=0xFFFFFFFF),
+    ],
+)
+def test_zip_preflight_rejects_zip64(validator, tmp_path, eocd):
+    path = tmp_path / "zip64.whl"
+    path.write_bytes(eocd)
+
+    with pytest.raises(validator.DistributionError, match="ZIP64"):
+        validator._preflight_zip(path)
+
+
+def test_zip_preflight_rejects_missing_eocd(validator, tmp_path):
+    path = tmp_path / "invalid.whl"
+    path.write_bytes(b"not a zip")
+
+    with pytest.raises(validator.DistributionError, match="EOCD|ZIP"):
+        validator._preflight_zip(path)
+
+
+def test_wheel_preflight_runs_before_zipfile(validator, tmp_path, monkeypatch):
+    wheel = write_wheel(tmp_path)
+    monkeypatch.setattr(validator, "MAX_WHEEL_MEMBERS", 1)
+
+    def forbidden_zipfile(*args, **kwargs):
+        raise AssertionError("ZipFile must not open before central-directory preflight")
+
+    monkeypatch.setattr(validator.zipfile, "ZipFile", forbidden_zipfile)
+
+    with pytest.raises(validator.DistributionError, match="entry count|members|limit"):
+        validator.validate_wheel(wheel, VERSION)
 
 
 def test_wheel_reads_members_without_unbounded_archive_read(
@@ -646,6 +794,76 @@ def test_sdist_extraction_preserves_the_single_project_root(validator, tmp_path)
     assert (root / f"src/{PROJECT_NAME}/report_schema.json").is_file()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX private-directory permission bits")
+def test_sdist_snapshot_uses_private_temporary_root(validator, tmp_path, monkeypatch):
+    real_temporary_directory = tempfile.TemporaryDirectory
+    modes = []
+
+    def recording_temporary_directory(*args, **kwargs):
+        directory = real_temporary_directory(*args, **kwargs)
+        modes.append(Path(directory.name).stat().st_mode & 0o777)
+        return directory
+
+    monkeypatch.setattr(
+        validator.tempfile, "TemporaryDirectory", recording_temporary_directory
+    )
+    sdist = write_sdist(tmp_path)
+
+    validator.extract_sdist(sdist, tmp_path / "extracted")
+
+    assert modes == [0o700]
+
+
+def test_sdist_snapshot_is_unaffected_by_original_path_replacement(
+    validator, tmp_path, monkeypatch
+):
+    sdist = write_sdist(tmp_path)
+    original_scan = validator._scan_sdist_archive
+
+    def scan_and_replace(snapshot):
+        result = original_scan(snapshot)
+        sdist.write_bytes(b"original path replaced")
+        return result
+
+    monkeypatch.setattr(validator, "_scan_sdist_archive", scan_and_replace)
+
+    root = validator.extract_sdist(sdist, tmp_path / "extracted")
+
+    assert (root / "pyproject.toml").read_bytes() == PYPROJECT
+
+
+def test_sdist_snapshot_hash_is_verified(validator, tmp_path, monkeypatch):
+    sdist = write_sdist(tmp_path)
+    monkeypatch.setattr(validator, "_sha256_file", lambda path: "0" * 64)
+
+    with pytest.raises(validator.DistributionError, match="snapshot|hash"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
+def test_sdist_snapshot_hash_is_rechecked_after_extraction(
+    validator, tmp_path, monkeypatch
+):
+    sdist = write_sdist(tmp_path)
+    original_scan = validator._scan_sdist_archive
+    original_extractall = tarfile.TarFile.extractall
+    snapshots = []
+
+    def capture_snapshot(snapshot):
+        snapshots.append(snapshot)
+        return original_scan(snapshot)
+
+    def corrupt_snapshot_after_extract(self, *args, **kwargs):
+        result = original_extractall(self, *args, **kwargs)
+        snapshots[0].write_bytes(b"snapshot changed after extraction")
+        return result
+
+    monkeypatch.setattr(validator, "_scan_sdist_archive", capture_snapshot)
+    monkeypatch.setattr(tarfile.TarFile, "extractall", corrupt_snapshot_after_extract)
+
+    with pytest.raises(validator.DistributionError, match="snapshot|hash"):
+        validator.extract_sdist(sdist, tmp_path / "extracted")
+
+
 def test_sdist_extraction_rejects_path_traversal(validator, tmp_path):
     sdist = write_sdist(
         tmp_path,
@@ -826,6 +1044,78 @@ def test_sdist_extraction_allows_alias_candidates_in_different_directories(
     root = validator.extract_sdist(sdist, tmp_path / "extracted")
 
     assert (root / "first/PYPROJ~1.TOM").read_bytes() == b"alias\n"
+
+
+def test_tar_preflight_accepts_bounded_extension_headers(validator, tmp_path):
+    sdist = write_raw_tar(
+        tmp_path,
+        [
+            (f"{SDIST_ROOT}/./@PaxHeader", 3, b"x"),
+            (f"{SDIST_ROOT}/file.txt", 0, b"0"),
+        ],
+    )
+
+    validator._preflight_tar(sdist)
+
+
+@pytest.mark.parametrize(
+    ("constant", "limit", "headers", "message"),
+    [
+        (
+            "MAX_TAR_EXTENSION_MEMBER_BYTES",
+            1024,
+            [(f"{SDIST_ROOT}/pax", 1025, b"x")],
+            "extension|single|limit",
+        ),
+        (
+            "MAX_TAR_EXTENSION_BYTES",
+            1024,
+            [
+                (f"{SDIST_ROOT}/pax1", 512, b"x"),
+                (f"{SDIST_ROOT}/pax2", 513, b"g"),
+            ],
+            "extension|total|limit",
+        ),
+        (
+            "MAX_TAR_EXTENSION_HEADERS",
+            1,
+            [
+                (f"{SDIST_ROOT}/long1", 1, b"L"),
+                (f"{SDIST_ROOT}/long2", 1, b"K"),
+            ],
+            "extension|count|limit",
+        ),
+        (
+            "MAX_TAR_PHYSICAL_HEADERS",
+            2,
+            [
+                (f"{SDIST_ROOT}/one", 0, b"0"),
+                (f"{SDIST_ROOT}/two", 0, b"0"),
+                (f"{SDIST_ROOT}/three", 0, b"0"),
+            ],
+            "physical|header|limit",
+        ),
+        (
+            "MAX_TAR_DECLARED_BYTES",
+            1024,
+            [(f"{SDIST_ROOT}/large", 1025, b"0")],
+            "declared|total|limit",
+        ),
+    ],
+)
+def test_tar_preflight_rejects_limits_before_tarfile_open(
+    validator, tmp_path, monkeypatch, constant, limit, headers, message
+):
+    sdist = write_raw_tar(tmp_path, headers)
+    monkeypatch.setattr(validator, constant, limit)
+
+    def forbidden_tarfile(*args, **kwargs):
+        raise AssertionError("tarfile.open must not run before raw TAR preflight")
+
+    monkeypatch.setattr(validator.tarfile, "open", forbidden_tarfile)
+
+    with pytest.raises(validator.DistributionError, match=message):
+        validator.validate_sdist(sdist, VERSION)
 
 
 @pytest.mark.parametrize("operation", ["validate", "extract"])
