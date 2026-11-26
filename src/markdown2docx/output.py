@@ -23,9 +23,13 @@ FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 FILE_ATTRIBUTE_DIRECTORY = 0x10
-FILE_ATTRIBUTE_NORMAL = 0x80
 FILE_ATTRIBUTE_TAG_INFO = 9
-INVALID_HANDLE_VALUE = -1
+FILE_TYPE_DISK = 1
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class WindowsFileAttributes(ctypes.Structure):
+    _fields_ = [("attributes", ctypes.c_uint32), ("tag", ctypes.c_uint32)]
 
 
 def _windows_api() -> tuple[Any, Any, Any]:
@@ -57,6 +61,8 @@ def _windows_api() -> tuple[Any, Any, Any]:
     kernel.GetFileInformationByHandleEx.restype = getattr(
         wintypes, "BOOL", ctypes.c_int
     )
+    kernel.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel.GetFileType.restype = wintypes.DWORD
     return windows, kernel, wintypes
 
 
@@ -64,10 +70,7 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
     """Pin every Windows path component, rejecting links and reparse points."""
     import msvcrt
 
-    windows, kernel, wintypes = _windows_api()
-
-    class Attributes(ctypes.Structure):
-        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+    windows, kernel, _ = _windows_api()
 
     absolute = os.path.abspath(path)
     anchor = os.path.splitdrive(absolute)[0] + os.sep
@@ -99,7 +102,7 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
             if handle == INVALID_HANDLE_VALUE:
                 raise windows.WinError(windows.get_last_error())
             handles.append(handle)
-            info = Attributes()
+            info = WindowsFileAttributes()
             if not kernel.GetFileInformationByHandleEx(
                 handle,
                 FILE_ATTRIBUTE_TAG_INFO,
@@ -111,7 +114,10 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
                 raise OSError(f"Refusing resource reparse point: {component}")
             if is_directory and not info.attributes & FILE_ATTRIBUTE_DIRECTORY:
                 raise OSError(f"Resource directory is not a directory: {component}")
-            if not is_directory and not info.attributes & FILE_ATTRIBUTE_NORMAL:
+            if not is_directory and (
+                info.attributes & FILE_ATTRIBUTE_DIRECTORY
+                or kernel.GetFileType(handle) != FILE_TYPE_DISK
+            ):
                 raise OSError(f"Resource is not a regular file: {component}")
         descriptor: int = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
             handles[-1], os.O_RDONLY | getattr(os, "O_BINARY", 0)
@@ -306,26 +312,35 @@ def _windows_output(destination: Path, *, overwrite: bool) -> Iterator[Path]:
     Omitting FILE_SHARE_DELETE prevents ancestors from being renamed/replaced
     while path-based writing and publication are in progress.
     """
-    import ctypes
-
-    windows, kernel, wintypes = _windows_api()
-
-    class Attributes(ctypes.Structure):
-        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+    windows, kernel, _ = _windows_api()
 
     handles = []
 
     def pin(path: Path) -> None:
-        handle = kernel.CreateFileW(str(path), 0x80, 0x3, None, 3, 0x02200000, None)
-        if handle == ctypes.c_void_p(-1).value:
+        handle = kernel.CreateFileW(
+            str(path),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle == INVALID_HANDLE_VALUE:
             raise windows.WinError(windows.get_last_error())
-        info = Attributes()
+        info = WindowsFileAttributes()
         if not kernel.GetFileInformationByHandleEx(
-            handle, 9, ctypes.byref(info), ctypes.sizeof(info)
+            handle,
+            FILE_ATTRIBUTE_TAG_INFO,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
         ):
             kernel.CloseHandle(handle)
             raise windows.WinError(windows.get_last_error())
-        if info.attributes & 0x400 or not info.attributes & 0x10:
+        if (
+            info.attributes & FILE_ATTRIBUTE_REPARSE_POINT
+            or not info.attributes & FILE_ATTRIBUTE_DIRECTORY
+        ):
             kernel.CloseHandle(handle)
             raise OSError(f"Refusing unsafe output directory/reparse point: {path}")
         handles.append(handle)
