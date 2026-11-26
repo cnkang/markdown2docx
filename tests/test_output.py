@@ -1,21 +1,29 @@
 """Regression coverage for output namespace attacks and atomic publication."""
 
+import ctypes
 import ntpath
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 from docx import Document
 from docx.document import Document as DocumentType
 
 import markdown2docx.converter as converter_module
+import markdown2docx.output as output_module
 from markdown2docx.config import MarkdownToDocxConfig
 from markdown2docx.converter import MarkdownToDocxConverter
 from markdown2docx.exceptions import ConversionError, TemplateError, ValidationError
-from markdown2docx.output import staged_docx_output
+from markdown2docx.output import (
+    PinnedDirectory,
+    secure_temporary_directory,
+    staged_docx_output,
+)
 from markdown2docx.templates import DocxTemplateManager
 
 posix_only = pytest.mark.skipif(
@@ -25,6 +33,15 @@ posix_only = pytest.mark.skipif(
 windows_only = pytest.mark.skipif(
     os.name != "nt", reason="Windows directory handles and namespace semantics"
 )
+
+
+class WindowsOSProxy:
+    """Exercise Windows branches without changing pathlib's host platform."""
+
+    name = "nt"
+
+    def __getattr__(self, name):
+        return getattr(os, name)
 
 
 @pytest.fixture(name="render", params=["conversion", "template"])
@@ -357,12 +374,257 @@ def test_conversion_workspace_replacement_cannot_capture_ast_resources_or_refere
     monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
     monkeypatch.setattr(converter_module, "write_docx", stop_writer)
 
-    with pytest.raises((ConversionError, OSError)):
+    with pytest.raises(ConversionError):
         MarkdownToDocxConverter().convert_untrusted(source, output)
 
     assert attack["directory"] is not None
     assert not list(attack["directory"].iterdir())
     assert not output.exists()
+
+
+@posix_only
+def test_secure_temporary_directory_removes_its_root_entry():
+    """Successful workspaces must not leave an empty directory in /tmp."""
+    with secure_temporary_directory(prefix="md2docx-lifecycle-") as workspace:
+        root = workspace.path
+        assert root.is_dir()
+
+    assert not os.path.lexists(root)
+
+
+@pytest.mark.parametrize("stage", ["create", "ast", "reference", "assert", "cleanup"])
+def test_conversion_workspace_oserrors_are_conversion_errors(
+    monkeypatch, tmp_path, stage
+):
+    source = tmp_path / "input.md"
+    source.write_text("# Document", encoding="utf-8")
+    output = tmp_path / "report.docx"
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+
+    if stage == "create":
+
+        @contextmanager
+        def fail_create(*_args, **_kwargs):
+            raise OSError("workspace create failed")
+            yield
+
+        monkeypatch.setattr(converter_module, "secure_temporary_directory", fail_create)
+    elif stage == "ast":
+        original_write = PinnedDirectory.write_bytes
+
+        def fail_write(self, name, *args, **kwargs):
+            if name == "input.json":
+                raise OSError("AST write failed")
+            return original_write(self, name, *args, **kwargs)
+
+        monkeypatch.setattr(PinnedDirectory, "write_bytes", fail_write)
+    elif stage == "reference":
+
+        def fail_reference(*_args, **_kwargs):
+            raise OSError("reference write failed")
+
+        monkeypatch.setattr(
+            converter_module.DocxTemplateManager,
+            "create_reference",
+            fail_reference,
+        )
+    elif stage == "assert":
+
+        def fail_assert(self):
+            raise OSError("workspace identity failed")
+
+        monkeypatch.setattr(PinnedDirectory, "assert_pinned", fail_assert)
+    else:
+        original_workspace = converter_module.secure_temporary_directory
+
+        @contextmanager
+        def fail_cleanup(*args, **kwargs):
+            with original_workspace(*args, **kwargs) as workspace:
+                try:
+                    yield workspace
+                finally:
+                    raise OSError("workspace cleanup failed")
+
+        monkeypatch.setattr(
+            converter_module, "secure_temporary_directory", fail_cleanup
+        )
+
+    with pytest.raises(ConversionError) as error:
+        MarkdownToDocxConverter().convert_untrusted(source, output)
+
+    assert isinstance(error.value.original_error, OSError)
+
+
+@posix_only
+def test_windows_workspace_rejects_ordinary_directory_replacement(
+    monkeypatch, tmp_path
+):
+    """The post-mkdtemp canary/identity check must reject a swapped ordinary dir."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    temporary = parent / "md2docx-convert-fixed"
+    moved = parent / "original-workspace"
+
+    def create_directory(*_args, **_kwargs):
+        temporary.mkdir()
+        return temporary
+
+    def replace_before_open(path, *, directory=True):
+        if path == temporary:
+            temporary.rename(moved)
+            temporary.mkdir()
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        if directory:
+            flags |= os.O_DIRECTORY
+        return os.open(path, flags)
+
+    kernel = SimpleNamespace(CloseHandle=os.close)
+    monkeypatch.setattr(output_module, "os", WindowsOSProxy())
+    monkeypatch.setattr(output_module, "_windows_api", lambda: (None, kernel, None))
+    monkeypatch.setattr(
+        output_module,
+        "_open_windows_directory_handle",
+        lambda path: os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+    )
+    monkeypatch.setattr(
+        output_module,
+        "open_windows_resource",
+        lambda path, directory=True, **_: replace_before_open(
+            path, directory=directory
+        ),
+    )
+    monkeypatch.setattr(output_module.tempfile, "mkdtemp", create_directory)
+
+    with pytest.raises(OSError, match="identity|replaced"):
+        with secure_temporary_directory(prefix="md2docx-convert-", directory=parent):
+            pytest.fail("A replaced Windows workspace must not be yielded")
+
+    assert moved.is_dir()
+    assert not list(moved.iterdir())
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_windows_workspace_write_uses_reparse_safe_helper(
+    monkeypatch, tmp_path, replace
+):
+    """Windows AST/reference writes must not use pathname O_TRUNC."""
+    canary = tmp_path / "canary.docx"
+    canary.write_bytes(b"protected")
+    reference = tmp_path / "reference.docx"
+    if replace:
+        reference.symlink_to(canary)
+    actual = tmp_path / "actual.docx"
+    calls = []
+
+    def writable(path, *, replace):
+        calls.append((path, replace))
+        if path.is_symlink():
+            raise OSError("Refusing resource reparse point")
+        return os.open(actual, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+    monkeypatch.setattr(output_module, "os", WindowsOSProxy())
+    monkeypatch.setattr(output_module, "open_windows_writable", writable, raising=False)
+    workspace = PinnedDirectory(tmp_path, descriptor=0)
+
+    if replace:
+        with pytest.raises(OSError, match="reparse point"):
+            workspace.write_bytes("reference.docx", b"replacement", replace=True)
+    else:
+        workspace.write_bytes("reference.docx", b"replacement", replace=False)
+
+    assert calls == [(reference, replace)]
+    if replace:
+        assert not actual.exists()
+    else:
+        assert actual.read_bytes() == b"replacement"
+    assert canary.read_bytes() == b"protected"
+
+
+@pytest.mark.parametrize("replace", [False, True])
+@pytest.mark.parametrize("reparse", [False, True])
+def test_windows_writable_resource_rejects_reparse_and_uses_create_semantics(
+    monkeypatch, tmp_path, replace, reparse
+):
+    """GENERIC_WRITE handles validate reparse tags before CRT conversion."""
+    calls = []
+    current = []
+
+    def create_file(path, access, share, security, creation, flags, template):
+        calls.append((path, access, share, creation, flags))
+        current[:] = [path]
+        return 200
+
+    def information(_handle, _kind, buffer, _size):
+        details = output_module.WindowsFileAttributes.from_address(
+            ctypes.cast(buffer, ctypes.c_void_p).value
+        )
+        if current[0].endswith("reference.docx"):
+            details.attributes = 0x80 | (
+                output_module.FILE_ATTRIBUTE_REPARSE_POINT if reparse else 0
+            )
+        else:
+            details.attributes = output_module.FILE_ATTRIBUTE_DIRECTORY
+        details.tag = 0
+        return True
+
+    kernel = SimpleNamespace(
+        CreateFileW=Mock(side_effect=create_file),
+        CloseHandle=Mock(),
+        GetFileInformationByHandleEx=Mock(side_effect=information),
+        GetFileType=Mock(return_value=output_module.FILE_TYPE_DISK),
+    )
+    osfhandle = Mock(return_value=700)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+    monkeypatch.setitem(
+        sys.modules, "msvcrt", SimpleNamespace(open_osfhandle=osfhandle)
+    )
+
+    if reparse:
+        with pytest.raises(OSError, match="reparse point"):
+            output_module.open_windows_writable(
+                tmp_path / "reference.docx", replace=replace
+            )
+        osfhandle.assert_not_called()
+    else:
+        assert (
+            output_module.open_windows_writable(
+                tmp_path / "reference.docx", replace=replace
+            )
+            == 700
+        )
+        osfhandle.assert_called_once()
+
+    assert calls[-1][1] == 0x40000000
+    assert (
+        calls[-1][2] == output_module.FILE_SHARE_READ | output_module.FILE_SHARE_WRITE
+    )
+    assert calls[-1][3] == (output_module.OPEN_EXISTING if replace else 1)
+    assert calls[-1][4] & output_module.FILE_FLAG_OPEN_REPARSE_POINT
+    assert not calls[-1][4] & output_module.FILE_FLAG_BACKUP_SEMANTICS
+
+
+@windows_only
+def test_windows_conversion_workspace_rejects_junction_parent(tmp_path, monkeypatch):
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    junction = tmp_path / "junction"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(protected)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    source = tmp_path / "input.md"
+    source.write_text("# Document", encoding="utf-8")
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    try:
+        with pytest.raises(ConversionError, match="reparse|unsafe"):
+            MarkdownToDocxConverter().convert_untrusted(
+                source, junction / "nested" / "report.docx"
+            )
+        assert not (protected / "nested").exists()
+    finally:
+        junction.rmdir()
 
 
 @windows_only
