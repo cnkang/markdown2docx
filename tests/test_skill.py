@@ -24,7 +24,7 @@ def launcher():
 
 
 def test_execution_revision_is_the_reviewed_remediation_commit(launcher):
-    assert launcher.EXECUTION_REVISION == "1b01b2c46b5fe20329f9487977c1f1be89a8cc40"
+    assert launcher.EXECUTION_REVISION == "bac6731231a38f9873fd1dfeba02ce1c8a448a76"
 
 
 def test_execution_revision_is_a_resolvable_commit(launcher):

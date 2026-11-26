@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_WORKFLOW_PATH = "./.github/workflows/test.yml"
@@ -280,6 +281,28 @@ def test_repository_pins_python_314():
 
     assert version_path.is_file(), ".python-version is missing"
     assert version_path.read_text(encoding="utf-8").strip() == "3.14"
+
+
+def test_all_setup_uv_steps_use_a_patched_version(test_workflow, release_workflow):
+    setup_steps = [
+        (workflow_name, job_id, step)
+        for workflow_name, workflow in (
+            ("test", test_workflow),
+            ("release", release_workflow),
+        )
+        for job_id, job in workflow["jobs"].items()
+        for step in job.get("steps", [])
+        if step.get("id") == "setup-uv"
+    ]
+
+    assert setup_steps
+    for workflow_name, job_id, step in setup_steps:
+        version = step.get("with", {}).get("version")
+        location = f"{workflow_name}/{job_id}/setup-uv"
+        assert version, f"{location} must pin a uv version"
+        assert Version(version) >= Version("0.13.4"), (
+            f"{location} pins uv {version}, which lacks the 0.13.4 security fix"
+        )
 
 
 def test_release_build_has_only_packaging_steps(release_workflow):
