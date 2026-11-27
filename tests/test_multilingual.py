@@ -1670,6 +1670,116 @@ def test_effective_toc_title_is_modeled_and_verified(
     assert seen_toc == [True]
 
 
+def test_custom_toc_title_uses_the_font_assigned_to_its_script(tmp_path):
+    source = tmp_path / "input.md"
+    source.write_text(
+        "---\ntoc: true\ntoc-title: 中文\n---\n\n# Heading\n\nBody\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output.docx"
+    report = MarkdownToDocxConverter().convert_with_report(
+        source, output, toc=True, lang="en", offline=True
+    )
+
+    assert report.checks["text_integrity"] == report.checks["font_coverage"] == "passed"
+    root = parts(output)["word/document.xml"]
+    heading = root.xpath("//w:p[w:pPr/w:pStyle[@w:val='TOCHeading']]", namespaces=NS)[0]
+    runs = [
+        (
+            paragraph_text(run),
+            run.find(W + "rPr/" + W + "rFonts").get(W + "eastAsia"),
+        )
+        for run in heading.iter(W + "r")
+        if paragraph_text(run)
+    ]
+    assert ("中文", "Noto Sans CJK SC") in runs
+
+
+def test_smart_quotes_are_modeled_in_text_structure(tmp_path):
+    config = MarkdownToDocxConfig()
+    config.pandoc.reader_format = "gfm+smart"
+    source = tmp_path / "quotes.md"
+    source.write_text("He said \"hello\" and 'bye'.\n", encoding="utf-8")
+    output = tmp_path / "quotes.docx"
+    report = MarkdownToDocxConverter(config=config).convert_with_report(
+        source, output, lang="en", offline=True
+    )
+
+    assert report.checks["text_integrity"] == "passed"
+    paragraph = parts(output)["word/document.xml"].find(W + "body/" + W + "p")
+    assert paragraph_text(paragraph) == "He said \u201chello\u201d and \u2018bye\u2019."
+
+
+@pytest.mark.parametrize("position", ["above", "below"])
+def test_table_caption_position_controls_expected_marker_order(tmp_path, position):
+    config = MarkdownToDocxConfig()
+    config.pandoc.reader_format = "markdown"
+    source = tmp_path / f"table-{position}.md"
+    source.write_text(
+        "| a |\n|---|\n| b |\n\n: My *caption*\n\nAfter.\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / f"table-{position}.docx"
+    report = MarkdownToDocxConverter(config=config).convert_with_report(
+        source,
+        output,
+        lang="en",
+        offline=True,
+        extra_args=[f"--table-caption-position={position}"],
+    )
+
+    assert report.checks["text_integrity"] == "passed"
+    root = parts(output)["word/document.xml"]
+    paragraphs = [
+        "".join(paragraph.xpath(".//w:t/text()", namespaces=NS))
+        for paragraph in root.iter(W + "p")
+    ]
+    caption = paragraphs.index("My caption")
+    cell = paragraphs.index("a")
+    if position == "above":
+        assert caption < cell
+    else:
+        assert cell < caption
+
+
+@pytest.mark.parametrize("position", ["above", "below"])
+def test_unexplained_table_marker_swap_still_fails(tmp_path, monkeypatch, position):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    config = MarkdownToDocxConfig()
+    config.pandoc.reader_format = "markdown"
+    source = tmp_path / f"table-swap-{position}.md"
+    source.write_text(
+        "| a |\n|---|\n| b |\n\n: My *caption*\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / f"table-swap-{position}.docx"
+    output.write_bytes(b"original")
+    verify = MultilingualDocument._verify_output
+
+    def swap_then_verify(self, candidate):
+        def swap(root):
+            caption_run = root.xpath("//w:r[w:t[text()='My']]", namespaces=NS)[0]
+            cell_run = root.xpath("//w:r[w:t[text()='a']]", namespaces=NS)[0]
+            caption_text = caption_run.find(W + "t")
+            cell_text = cell_run.find(W + "t")
+            caption_text.text, cell_text.text = cell_text.text, caption_text.text
+
+        rewrite_docx(candidate, {"word/document.xml": swap})
+        verify(self, candidate)
+
+    monkeypatch.setattr(MultilingualDocument, "_verify_output", swap_then_verify)
+    with pytest.raises(ValidationError):
+        MarkdownToDocxConverter(config=config).convert(
+            source,
+            output,
+            lang="en",
+            offline=True,
+            extra_args=[f"--table-caption-position={position}"],
+        )
+    assert output.read_bytes() == b"original"
+
+
 def test_structural_errors_report_paragraph_and_events(tmp_path, monkeypatch):
     from markdown2docx.multilingual import MultilingualDocument
 

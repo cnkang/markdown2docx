@@ -271,6 +271,15 @@ def _coalesce_events(events: list[str | None]) -> list[str | None]:
 
 
 @dataclass
+class TableRunOrder:
+    """Marker runs whose serialized order depends on the table caption position."""
+
+    story: str
+    caption: list[str]
+    end_index: int
+
+
+@dataclass
 class TextStructure:
     """Visible paragraph events, where None denotes a hard line break."""
 
@@ -467,14 +476,22 @@ class MultilingualDocument:
         lang: str | None,
         base_direction: str = "auto",
         number_sections: bool = False,
+        table_caption_position: str = "above",
     ) -> None:
         if base_direction not in {"auto", "ltr", "rtl"}:
             raise ConfigurationError("direction", "Direction must be auto, ltr or rtl")
+        if table_caption_position not in {"above", "below"}:
+            raise ConfigurationError(
+                "table-caption-position",
+                "Table caption position must be above or below",
+            )
         self.ast = copy.deepcopy(ast)
         self.resolver = resolver
         self.lang = language(lang)
         self.base_direction = base_direction
         self.number_sections = number_sections
+        self.table_caption_position = table_caption_position
+        self._table_orders: list[TableRunOrder] = []
         self.runs: dict[str, RunContext] = {}
         self._marker_prefix = "MD2D" + uuid.uuid4().hex[:12]
         self.warnings: list[dict[str, str]] = []
@@ -503,6 +520,23 @@ class MultilingualDocument:
             bookmarks[identifier] = identifier
             bookmarks[hashed] = identifier
         return bookmarks
+
+    def _apply_table_caption_order(self, expected_order: dict[str, list[str]]) -> None:
+        """Move below-table caption runs after the table's body runs.
+
+        Table groups are recorded after their nested tables, so inner captions
+        are positioned before the enclosing caption when both are below.
+        """
+        names = list(self.runs)
+        for table in self._table_orders:
+            order = expected_order.get(table.story)
+            if order is None or not table.caption:
+                continue
+            caption = set(table.caption)
+            order[:] = [name for name in order if name not in caption]
+            following = names[table.end_index] if table.end_index < len(names) else None
+            index = order.index(following) if following in order else len(order)
+            order[index:index] = table.caption
 
     def _context_key(self, lang: str | None, context: str) -> tuple[str, bool]:
         identity = (lang, context)
@@ -579,23 +613,9 @@ class MultilingualDocument:
             self.ast["meta"]["dir"] = {"t": "MetaString", "c": self.base_direction}
         else:
             self.ast["meta"].pop("dir", None)
-        if toc:
-            visible_title = text_of(toc_title) or title
-            self.resolver.resolve(
-                "sans",
-                (
-                    self._checked_text(visible_title)
-                    if title_key not in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}
-                    else ""
-                ),
-            )
-            if title_key in {"ar", "zh-Hans", "zh-Hant", "ja", "ko"}:
-                key = (
-                    "arabic"
-                    if title_key == "ar"
-                    else cjk_key(title_key, visible_title)[0]
-                )
-                self.resolver.resolve(key, self._checked_text(visible_title))
+        # The metadata walk above resolves the font assigned to each TOC title
+        # fragment. A custom title may mix scripts, so it must not be checked
+        # as a whole against the sans font.
         for structure in self._structures:
             structure.events[:] = _coalesce_events(structure.events)
         return self.ast
@@ -838,6 +858,35 @@ class MultilingualDocument:
                 code=True,
                 structure=structure,
             )
+        if kind == "Quoted":
+            quote_type, inlines = content
+            quote_kind = (
+                quote_type if isinstance(quote_type, str) else quote_type.get("t")
+            )
+            marks = {
+                "SingleQuote": ("\u2018", "\u2019"),
+                "DoubleQuote": ("\u201c", "\u201d"),
+            }.get(quote_kind)
+            if marks is None:
+                raise ConfigurationError("quoted", f"Unknown quote type: {quote_kind}")
+            if structure is not None:
+                structure.add_text(marks[0])
+            node["c"] = [
+                quote_type,
+                self._walk(
+                    inlines,
+                    lang,
+                    inherited_dir,
+                    context,
+                    pdir,
+                    local_dir,
+                    structure,
+                    story,
+                ),
+            ]
+            if structure is not None:
+                structure.add_text(marks[1])
+            return node
         if kind in {"Space", "SoftBreak"}:
             if structure is not None:
                 structure.add_space()
@@ -863,6 +912,38 @@ class MultilingualDocument:
                 self.resolver.resolve(key, self._checked_text(part))
                 self.scripts.add(name)
             self.code_languages[content[0][0]] = lang
+            return node
+        if kind == "Table":
+            # Pandoc can serialize the caption below the table. Record caption
+            # runs separately so expected marker order can follow the writer.
+            before_caption = len(self.runs)
+            content[1] = self._walk(
+                content[1],
+                lang,
+                inherited_dir,
+                context,
+                pdir,
+                local_dir,
+                structure,
+                story,
+            )
+            after_caption = len(self.runs)
+            for index in range(2, len(content)):
+                content[index] = self._walk(
+                    content[index],
+                    lang,
+                    inherited_dir,
+                    context,
+                    pdir,
+                    local_dir,
+                    structure,
+                    story,
+                )
+            caption_markers = list(self.runs)[before_caption:after_caption]
+            if caption_markers:
+                self._table_orders.append(
+                    TableRunOrder(story, caption_markers, len(self.runs))
+                )
             return node
         if kind == "Note":
             node["c"] = self._walk(
@@ -947,6 +1028,8 @@ class MultilingualDocument:
                 else "document"
             )
             expected_order.setdefault(story, []).append(marker_name)
+        if self.table_caption_position == "below":
+            self._apply_table_caption_order(expected_order)
         before: list[str] = []
         after: list[str] = []
         code_text: dict[str, list[str]] = {}

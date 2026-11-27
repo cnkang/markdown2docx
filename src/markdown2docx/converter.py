@@ -60,6 +60,20 @@ from .templates import DocxTemplateManager
 logger = logging.getLogger(__name__)
 
 
+def _effective_table_caption_position(arguments: Sequence[str]) -> str:
+    """Return the last valid Pandoc table caption position, defaulting to above."""
+    position = "above"
+    for index, argument in enumerate(arguments):
+        value = None
+        if argument == "--table-caption-position" and index + 1 < len(arguments):
+            value = arguments[index + 1]
+        elif argument.startswith("--table-caption-position="):
+            value = argument.split("=", 1)[1]
+        if value in {"above", "below"}:
+            position = value
+    return position
+
+
 @contextlib.contextmanager
 def _conversion_workspace(
     input_path: Path, output_path: Path
@@ -405,6 +419,7 @@ class MarkdownToDocxConverter:
             lang=document_lang,
             base_direction=document_dir,
             number_sections="--number-sections" in args,
+            table_caption_position=_effective_table_caption_position(args),
         )
         document.code_size_pt = self.config.template.code_size_pt
         document.limits = self.config.limits
