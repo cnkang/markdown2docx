@@ -17,12 +17,9 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    uses: ./.github/workflows/test.yml
-  build:
-    needs: test
+  validate-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - id: require-release-tag
         name: Require a release tag
@@ -39,6 +36,14 @@ jobs:
             echo "Dispatch this workflow on the reviewed release tag itself"
             exit 1
           fi
+  test:
+    needs: validate-release
+    uses: ./.github/workflows/test.yml
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
       - id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

@@ -41,7 +41,6 @@ STEP_IF_ALLOWLIST = {
     "publish-pypi": "inputs.repository == 'pypi'",
 }
 BUILD_STEP_IDS = (
-    "require-release-tag",
     "checkout",
     "setup-uv",
     "download-test-evidence",
@@ -318,6 +317,14 @@ def test_release_calls_the_test_workflow(release_workflow):
     assert "steps" not in gate
 
 
+def test_release_validates_tag_before_running_tests(release_workflow):
+    validate = release_workflow["jobs"]["validate-release"]
+
+    assert "uses" not in validate
+    assert required_jobs(release_workflow["jobs"]["test"]) == {"validate-release"}
+    assert validate["steps"][0]["id"] == "require-release-tag"
+
+
 def test_release_build_requires_the_reusable_test_gate(release_workflow):
     assert required_jobs(release_workflow["jobs"]["build"]) == {"test"}
 
@@ -486,6 +493,7 @@ def test_required_evidence_is_checked_before_artifact_upload(test_workflow):
     assert steps[check_indices[0]]["run"].strip() == (
         "uv run --locked python scripts/check_test_evidence.py"
     )
+    assert steps[upload_indices[0]]["with"].get("overwrite") == "true"
 
 
 @pytest.mark.parametrize("job_id", CRITICAL_JOB_IDS)
@@ -525,10 +533,11 @@ def test_critical_workflow_nodes_do_not_continue_on_error(
 def test_release_tag_validation_is_unconditional_and_bound_to_dispatch(
     release_workflow,
 ):
-    tag_step = step_by_id(release_workflow["jobs"]["build"], "require-release-tag")
+    validate = release_workflow["jobs"]["validate-release"]
+    tag_step = step_by_id(validate, "require-release-tag")
 
     assert tag_structure_errors(tag_step) == []
-    assert release_workflow["jobs"]["build"]["steps"][0]["id"] == tag_step["id"]
+    assert validate["steps"][0]["id"] == tag_step["id"]
 
 
 @pytest.mark.parametrize(
@@ -670,7 +679,9 @@ def test_release_tag_validation_rejects_invalid_dispatch(
     run_ref_type,
     expected_error,
 ):
-    tag_step = step_by_id(release_workflow["jobs"]["build"], "require-release-tag")
+    tag_step = step_by_id(
+        release_workflow["jobs"]["validate-release"], "require-release-tag"
+    )
 
     result = run_tag_validation(
         bash_executable, tag_step, release_ref, run_ref, run_ref_type
@@ -681,7 +692,9 @@ def test_release_tag_validation_rejects_invalid_dispatch(
 
 
 def test_release_tag_validation_accepts_matching_tag(release_workflow, bash_executable):
-    tag_step = step_by_id(release_workflow["jobs"]["build"], "require-release-tag")
+    tag_step = step_by_id(
+        release_workflow["jobs"]["validate-release"], "require-release-tag"
+    )
 
     result = run_tag_validation(bash_executable, tag_step, "v1.2.3", "v1.2.3", "tag")
 
