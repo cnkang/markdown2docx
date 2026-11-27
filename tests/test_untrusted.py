@@ -608,7 +608,8 @@ def test_windows_resource_helpers_reject_reparse_points(monkeypatch, tmp_path):
             tmp_path / "resource", directory=False
         )
         assert descriptor >= 1100
-        assert access_modes[:-1] == [0x80] * (len(access_modes) - 1)
+        directory_access = output.FILE_READ_ATTRIBUTES | output.FILE_TRAVERSE
+        assert access_modes[:-1] == [directory_access] * (len(access_modes) - 1)
         assert access_modes[-1] == 0x80000000
         kernel = kernels[-1]
         calls = kernel.CreateFileW.call_args_list

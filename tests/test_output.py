@@ -482,51 +482,128 @@ def test_conversion_workspace_oserrors_are_conversion_errors(
 
 
 @posix_only
-def test_windows_workspace_rejects_ordinary_directory_replacement(
-    monkeypatch, tmp_path
-):
-    """The post-mkdtemp canary/identity check must reject a swapped ordinary dir."""
+def test_windows_workspace_creation_is_atomic_and_pinned(monkeypatch, tmp_path):
+    """The Windows workspace must come from the atomic create-and-open helper."""
     parent = tmp_path / "parent"
     parent.mkdir()
     temporary = parent / "md2docx-convert-fixed"
-    moved = parent / "original-workspace"
+    created = []
+    cleaned = []
 
-    def create_directory(*_args, **_kwargs):
+    def create_directory(_parent_descriptor, directory, prefix):
         temporary.mkdir()
-        return temporary
+        created.append((directory, prefix))
+        return temporary, os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
 
-    def replace_before_open(path, *, directory=True):
-        if path == temporary:
-            temporary.rename(moved)
-            temporary.mkdir()
+    def open_resource(path, *, directory=True, **_kwargs):
         flags = os.O_RDONLY | os.O_NOFOLLOW
         if directory:
             flags |= os.O_DIRECTORY
         return os.open(path, flags)
 
+    @contextmanager
+    def windows_pin(_path):
+        yield
+
+    original_remove_contents = output_module._remove_windows_directory_contents
+
+    def remove_contents(path):
+        cleaned.append(path)
+        original_remove_contents(path)
+
     kernel = SimpleNamespace(CloseHandle=os.close)
     monkeypatch.setattr(output_module, "os", WindowsOSProxy())
     monkeypatch.setattr(output_module, "_windows_api", lambda: (None, kernel, None))
+    monkeypatch.setattr(output_module, "_windows_directory_pin", windows_pin)
+    monkeypatch.setattr(output_module, "_create_windows_directory", create_directory)
+    monkeypatch.setattr(output_module, "open_windows_resource", open_resource)
     monkeypatch.setattr(
-        output_module,
-        "_open_windows_directory_handle",
-        lambda path: os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+        output_module, "_remove_windows_directory_contents", remove_contents
     )
-    monkeypatch.setattr(
-        output_module,
-        "open_windows_resource",
-        lambda path, directory=True, **_: replace_before_open(
-            path, directory=directory
-        ),
+
+    with secure_temporary_directory(
+        prefix="md2docx-convert-", directory=parent
+    ) as workspace:
+        assert workspace.path == temporary
+        assert workspace.path.is_dir()
+        (workspace.path / "payload.txt").write_text("payload")
+
+    assert created == [(parent, "md2docx-convert-")]
+    assert cleaned == [temporary]
+    assert not temporary.exists()
+
+
+@posix_only
+def test_windows_workspace_uses_atomic_ntcreatefile(monkeypatch, tmp_path):
+    """The workspace handle must come from the same NtCreateFile that creates it."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent_descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    calls = []
+
+    def create_file(
+        handle_out,
+        access,
+        attributes,
+        _status,
+        _allocation,
+        _file_attributes,
+        share,
+        disposition,
+        options,
+        _ea,
+        _ea_length,
+    ):
+        calls.append(
+            {
+                "access": access,
+                "length": attributes.contents.Length,
+                "root": attributes.contents.RootDirectory,
+                "name_length": attributes.contents.ObjectName.contents.Length,
+                "attributes": attributes.contents.Attributes,
+                "share": share,
+                "disposition": disposition,
+                "options": options,
+            }
+        )
+        ctypes.cast(handle_out, ctypes.POINTER(ctypes.c_void_p))[0] = 0x1234
+        return 0
+
+    ntdll = SimpleNamespace(
+        NtCreateFile=Mock(side_effect=create_file),
+        RtlNtStatusToDosError=Mock(return_value=5),
     )
-    monkeypatch.setattr(output_module.tempfile, "mkdtemp", create_directory)
+    fake_msvcrt = SimpleNamespace(
+        get_osfhandle=lambda _descriptor: 0x5678,
+        open_osfhandle=lambda _handle, _flags: 999,
+    )
+    monkeypatch.setattr(output_module, "_windows_api", lambda: (None, Mock(), None))
+    monkeypatch.setattr(output_module, "_ntdll_api", lambda: ntdll)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
 
-    with pytest.raises(OSError, match="identity|replaced"):
-        with secure_temporary_directory(prefix="md2docx-convert-", directory=parent):
-            pytest.fail("A replaced Windows workspace must not be yielded")
+    try:
+        path, descriptor = output_module._create_windows_directory(
+            parent_descriptor, parent, "md2docx-"
+        )
+    finally:
+        os.close(parent_descriptor)
 
-    assert moved.is_dir()
-    assert not list(moved.iterdir())
+    assert path.parent == parent
+    assert path.name.startswith("md2docx-")
+    assert descriptor == 999
+    call = calls[0]
+    assert call["access"] & output_module.FILE_TRAVERSE
+    assert call["share"] == (
+        output_module.FILE_SHARE_READ | output_module.FILE_SHARE_WRITE
+    )
+    assert call["disposition"] == output_module.FILE_CREATE
+    assert call["options"] == (
+        output_module.FILE_DIRECTORY_FILE | output_module.FILE_SYNCHRONOUS_IO_NONALERT
+    )
+    assert call["root"] == 0x5678
+    assert call["attributes"] == output_module.OBJ_CASE_INSENSITIVE
+    assert call["length"] == ctypes.sizeof(output_module.WindowsObjectAttributes)
+    assert call["name_length"] == (len(path.name)) * 2
 
 
 @pytest.mark.parametrize("replace", [False, True])

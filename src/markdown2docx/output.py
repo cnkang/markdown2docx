@@ -16,23 +16,57 @@ from pathlib import Path
 from typing import Any, cast
 
 FILE_READ_ATTRIBUTES = 0x80
+FILE_TRAVERSE = 0x20
+SYNCHRONIZE = 0x100000
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 FILE_SHARE_READ = 0x1
 FILE_SHARE_WRITE = 0x2
 OPEN_EXISTING = 3
 CREATE_NEW = 1
+FILE_CREATE = 2
+FILE_DIRECTORY_FILE = 0x1
+FILE_SYNCHRONOUS_IO_NONALERT = 0x20
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 FILE_ATTRIBUTE_DIRECTORY = 0x10
 FILE_ATTRIBUTE_TAG_INFO = 9
 FILE_TYPE_DISK = 1
+OBJ_CASE_INSENSITIVE = 0x40
+STATUS_OBJECT_NAME_COLLISION = 0xC0000035
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
 class WindowsFileAttributes(ctypes.Structure):
     _fields_ = [("attributes", ctypes.c_uint32), ("tag", ctypes.c_uint32)]
+
+
+class WindowsUnicodeString(ctypes.Structure):
+    _fields_ = [
+        ("Length", ctypes.c_uint16),
+        ("MaximumLength", ctypes.c_uint16),
+        ("Buffer", ctypes.c_wchar_p),
+    ]
+
+
+class WindowsObjectAttributes(ctypes.Structure):
+    _fields_ = [
+        ("Length", ctypes.c_uint32),
+        ("RootDirectory", ctypes.c_void_p),
+        ("ObjectName", ctypes.POINTER(WindowsUnicodeString)),
+        ("Attributes", ctypes.c_uint32),
+        ("SecurityDescriptor", ctypes.c_void_p),
+        ("SecurityQualityOfService", ctypes.c_void_p),
+    ]
+
+
+class _WindowsStatus(ctypes.Union):
+    _fields_ = [("Status", ctypes.c_int32), ("Pointer", ctypes.c_void_p)]
+
+
+class WindowsIoStatusBlock(ctypes.Structure):
+    _fields_ = [("Status", _WindowsStatus), ("Information", ctypes.c_size_t)]
 
 
 def _identity(details: os.stat_result) -> tuple[int, int]:
@@ -196,6 +230,19 @@ def _remove_directory_tree(descriptor: int) -> None:
                 os.unlink(entry.name, dir_fd=descriptor)
 
 
+def _remove_windows_directory_contents(path: Path) -> None:
+    """Remove entries while the open workspace handle still pins the root."""
+    with os.scandir(path) as entries:
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path)
+                else:
+                    os.unlink(entry.path)
+            except FileNotFoundError:
+                continue
+
+
 def _windows_api() -> tuple[Any, Any, Any]:
     """Load the Windows handle APIs without importing them on other platforms."""
     import ctypes
@@ -230,6 +277,31 @@ def _windows_api() -> tuple[Any, Any, Any]:
     return windows, kernel, wintypes
 
 
+def _ntdll_api() -> Any:
+    """Load atomic directory creation without importing Windows APIs elsewhere."""
+    import ctypes
+
+    windows = cast(Any, ctypes)
+    ntdll = windows.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint32,
+        ctypes.POINTER(WindowsObjectAttributes),
+        ctypes.POINTER(WindowsIoStatusBlock),
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    ]
+    ntdll.NtCreateFile.restype = ctypes.c_int32
+    ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_int32]
+    ntdll.RtlNtStatusToDosError.restype = ctypes.c_uint32
+    return ntdll
+
+
 def _open_windows_resource(
     path: Path, *, directory: bool, write: bool, replace: bool
 ) -> int:
@@ -256,7 +328,7 @@ def _open_windows_resource(
                 FILE_FLAG_BACKUP_SEMANTICS if is_directory else 0
             )
             if is_directory:
-                access = FILE_READ_ATTRIBUTES
+                access = FILE_READ_ATTRIBUTES | FILE_TRAVERSE
             else:
                 access = GENERIC_READ
                 if write:
@@ -314,6 +386,62 @@ def open_windows_resource(path: Path, *, directory: bool) -> int:
 def open_windows_writable(path: Path, *, replace: bool) -> int:
     """Open a regular file for GENERIC_WRITE without following reparse points."""
     return _open_windows_resource(path, directory=False, write=True, replace=replace)
+
+
+def _create_windows_directory(
+    parent_descriptor: int, directory: Path, prefix: str
+) -> tuple[Path, int]:
+    """Create and open a workspace atomically relative to a pinned parent."""
+    import msvcrt
+
+    _, kernel, _ = _windows_api()
+    ntdll = _ntdll_api()
+    parent_handle = msvcrt.get_osfhandle(parent_descriptor)  # type: ignore[attr-defined]
+    for _ in range(100):
+        name = f"{prefix}{uuid.uuid4().hex}"
+        buffer = ctypes.create_unicode_buffer(name)
+        unicode_name = WindowsUnicodeString(
+            len(name) * 2,
+            (len(name) + 1) * 2,
+            ctypes.cast(buffer, ctypes.c_wchar_p),
+        )
+        attributes = WindowsObjectAttributes(
+            ctypes.sizeof(WindowsObjectAttributes),
+            parent_handle,
+            ctypes.pointer(unicode_name),
+            OBJ_CASE_INSENSITIVE,
+            None,
+            None,
+        )
+        status_block = WindowsIoStatusBlock()
+        handle = ctypes.c_void_p()
+        status = ntdll.NtCreateFile(
+            ctypes.byref(handle),
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            ctypes.pointer(attributes),
+            ctypes.pointer(status_block),
+            None,
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_CREATE,
+            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+            None,
+            0,
+        )
+        if (status & 0xFFFFFFFF) == STATUS_OBJECT_NAME_COLLISION:
+            continue
+        if status < 0:
+            error = ntdll.RtlNtStatusToDosError(status)
+            raise OSError(error, "Unable to create Windows workspace")
+        try:
+            descriptor = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
+                handle.value, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            )
+        except BaseException:
+            kernel.CloseHandle(handle)
+            raise
+        return directory / name, descriptor
+    raise OSError("Unable to create a unique Windows workspace")
 
 
 def _open_directory(path: str | Path) -> int:
@@ -531,17 +659,18 @@ def secure_temporary_directory(
             parent_descriptor = open_windows_resource(directory, directory=True)
             temporary: Path | None = None
             windows_descriptor: int | None = None
-            verified = False
             try:
                 parent_identity = _identity(os.fstat(parent_descriptor))
-                temporary = Path(tempfile.mkdtemp(prefix=prefix, dir=directory))
+                # NtCreateFile creates and opens the directory in one operation,
+                # so no other process can replace it before its handle is ours.
+                temporary, windows_descriptor = _create_windows_directory(
+                    parent_descriptor, directory, prefix
+                )
                 if _identity(os.stat(temporary.parent)) != parent_identity:
                     raise OSError("Windows workspace parent identity changed")
-                expected = _identity(os.stat(temporary))
-                windows_descriptor = open_windows_resource(temporary, directory=True)
-                if _identity(os.fstat(windows_descriptor)) != expected:
-                    raise OSError("Windows workspace identity changed after mkdtemp")
-                verified = True
+                workspace_identity = _identity(os.fstat(windows_descriptor))
+                if _identity(os.stat(temporary)) != workspace_identity:
+                    raise OSError("Windows workspace identity changed after creation")
                 canary_name = f".workspace-canary-{uuid.uuid4().hex}"
                 canary_value = uuid.uuid4().hex.encode("ascii")
                 canary_descriptor = os.open(
@@ -573,7 +702,7 @@ def secure_temporary_directory(
                             )
                     finally:
                         os.close(check_descriptor)
-                    if _identity(os.fstat(windows_descriptor)) != expected:
+                    if _identity(os.fstat(windows_descriptor)) != workspace_identity:
                         raise OSError(
                             "Windows workspace identity changed during canary"
                         )
@@ -584,18 +713,16 @@ def secure_temporary_directory(
             finally:
                 try:
                     if windows_descriptor is not None:
-                        os.close(windows_descriptor)
+                        try:
+                            if temporary is not None:
+                                _remove_windows_directory_contents(temporary)
+                        finally:
+                            os.close(windows_descriptor)
+                    if temporary is not None:
+                        with contextlib.suppress(FileNotFoundError):
+                            temporary.rmdir()
                 finally:
-                    try:
-                        if temporary is not None:
-                            if verified:
-                                with contextlib.suppress(FileNotFoundError):
-                                    shutil.rmtree(temporary)
-                            else:
-                                with contextlib.suppress(OSError):
-                                    temporary.rmdir()
-                    finally:
-                        os.close(parent_descriptor)
+                    os.close(parent_descriptor)
         return
 
     root = _system_temporary_root()
