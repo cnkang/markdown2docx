@@ -7,6 +7,7 @@ type safety, and configuration management.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import logging
@@ -14,8 +15,8 @@ import os
 
 # controlled argv, shell=False
 import subprocess  # nosec B404
-import tempfile
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Optional, Sequence, Union
@@ -33,6 +34,7 @@ except ImportError:
 from .archive import validate_archive
 from .config import MarkdownToDocxConfig
 from .exceptions import (
+    ConfigurationError,
     ConversionError,
     PandocError,
     PandocNotFoundError,
@@ -40,7 +42,11 @@ from .exceptions import (
 )
 from .fonts import FontResolver
 from .multilingual import MultilingualDocument, text_of
-from .output import staged_docx_output
+from .output import (
+    PinnedDirectory,
+    secure_temporary_directory,
+    staged_docx_output,
+)
 from .report import ConversionReport, render_preview
 from .resources import (
     stage_local_resources,
@@ -52,6 +58,51 @@ from .templates import DocxTemplateManager
 
 # Configure logger
 logger = logging.getLogger(__name__)
+
+
+def _effective_table_caption_position(arguments: Sequence[str]) -> str:
+    """Return the last valid Pandoc table caption position, defaulting to above."""
+    position = "above"
+    for index, argument in enumerate(arguments):
+        value = None
+        if argument == "--table-caption-position" and index + 1 < len(arguments):
+            value = arguments[index + 1]
+        elif argument.startswith("--table-caption-position="):
+            value = argument.split("=", 1)[1]
+        if value in {"above", "below"}:
+            position = value
+    return position
+
+
+def _writer_flags(arguments: Sequence[str]) -> tuple[bool, bool]:
+    """Interpret the TOC and numbering switches in Pandoc command-line order."""
+    toc = number_sections = False
+    for argument in arguments:
+        name, separator, value = argument.partition("=")
+        if name in {"--toc", "--table-of-contents"}:
+            toc = not separator or value == "true"
+        elif name == "--number-sections":
+            number_sections = not separator or value == "true"
+        elif name in {"-N", "--number-offset"}:
+            number_sections = True
+    return toc, number_sections
+
+
+@contextlib.contextmanager
+def _conversion_workspace(
+    input_path: Path, output_path: Path
+) -> Iterator[PinnedDirectory]:
+    """Normalize every workspace lifecycle OSError at the converter boundary."""
+    try:
+        with secure_temporary_directory(
+            prefix="md2docx-convert-",
+            directory=output_path.parent if os.name == "nt" else None,
+        ) as workspace:
+            yield workspace
+    except OSError as exc:
+        raise ConversionError(
+            str(input_path), f"Unable to manage conversion workspace: {exc}", exc
+        ) from exc
 
 
 class MarkdownToDocxConverter:
@@ -153,6 +204,64 @@ class MarkdownToDocxConverter:
         for warning in report.warnings:
             logger.warning("%s: %s", warning["code"], warning["message"])
         return Path(report.output_path)
+
+    def convert_untrusted(
+        self,
+        input_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        **kwargs: Any,
+    ) -> Path:
+        """Convert untrusted Markdown with the non-overridable safe resource policy."""
+        report = self.convert_untrusted_with_report(input_path, output_path, **kwargs)
+        for warning in report.warnings:
+            logger.warning("%s: %s", warning["code"], warning["message"])
+        return Path(report.output_path)
+
+    def convert_untrusted_with_report(
+        self,
+        input_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        *,
+        toc: Optional[bool] = None,
+        toc_depth: Optional[int] = None,
+        extra_args: Optional[Sequence[str]] = None,
+        validate_output: Optional[bool] = None,
+        lang: str | None = None,
+        direction: str | None = None,
+        offline: bool | None = None,
+        allow_unverified_fonts: bool | None = None,
+        resources_offline: bool | None = None,
+        restricted: bool | None = None,
+        render: bool = False,
+        preview_dir: str | Path | None = None,
+    ) -> ConversionReport:
+        """Convert with restricted resources and offline fonts, regardless of overrides."""
+        for name, value in (
+            ("offline", offline),
+            ("resources_offline", resources_offline),
+            ("restricted", restricted),
+        ):
+            if value is False:
+                raise ConfigurationError(
+                    f"untrusted.{name}",
+                    f"Untrusted conversion does not accept {name}=False",
+                )
+        return self.convert_with_report(
+            input_path,
+            output_path,
+            toc=toc,
+            toc_depth=toc_depth,
+            extra_args=extra_args,
+            validate_output=validate_output,
+            lang=lang,
+            direction=direction,
+            offline=True,
+            allow_unverified_fonts=allow_unverified_fonts,
+            resources_offline=True,
+            restricted=True,
+            render=render,
+            preview_dir=preview_dir,
+        )
 
     def convert_with_report(
         self,
@@ -308,26 +417,40 @@ class MarkdownToDocxConverter:
                 resolver.aliases[role] = resolver.audit_family(
                     family, allow_unverified=allow
                 )
+        toc_metadata = metadata.get("toc")
+        writer_toc, number_sections = _writer_flags(args)
+        effective_toc = writer_toc or (
+            isinstance(toc_metadata, dict)
+            and toc_metadata.get("t") == "MetaBool"
+            and bool(toc_metadata.get("c"))
+        )
         document = MultilingualDocument(
-            ast, resolver, lang=document_lang, base_direction=document_dir
+            ast,
+            resolver,
+            lang=document_lang,
+            base_direction=document_dir,
+            number_sections=number_sections,
+            table_caption_position=_effective_table_caption_position(args),
         )
         document.code_size_pt = self.config.template.code_size_pt
         document.limits = self.config.limits
-        annotated = document.annotate(toc=toc)
+        annotated = document.annotate(toc=effective_toc)
         timings["annotate_fonts"] = perf_counter() - annotated_start
-        with tempfile.TemporaryDirectory(prefix="md2docx-convert-") as temporary:
-            root = Path(temporary)
+        with _conversion_workspace(input_path, output_path) as workspace:
+            root = workspace.path
             if restricted_mode:
                 stage_local_resources(
                     annotated,
                     input_path.absolute().parent,
                     root,
                     max_bytes=self.config.limits.input_bytes,
+                    workspace=workspace,
                 )
             ast_path = root / "input.json"
-            ast_path.write_text(
-                json.dumps(annotated, ensure_ascii=False), encoding="utf-8"
+            workspace.write_bytes(
+                "input.json", json.dumps(annotated, ensure_ascii=False).encode("utf-8")
             )
+            workspace.assert_pinned()
             # JSON input is the annotated AST, not a second Markdown parse.
             args[args.index("-f") + 1] = "json"
             args.extend(
@@ -341,12 +464,14 @@ class MarkdownToDocxConverter:
                     root / "reference.docx",
                     self.config.template,
                     timeout=self.config.pandoc.timeout_seconds,
+                    workspace=workspace,
                 )
                 args.extend(["--reference-doc", str(reference)])
             try:
                 with staged_docx_output(
                     output_path, overwrite=self.config.conversion.overwrite_existing
                 ) as stage:
+                    workspace.assert_pinned()
                     try:
                         write_start = perf_counter()
                         write_docx(
@@ -485,6 +610,25 @@ class MarkdownToDocxConverter:
         except (OSError, zipfile.BadZipFile, KeyError, etree.XMLSyntaxError) as exc:
             raise TemplateError(str(path), f"Invalid DOCX template: {exc}") from exc
 
+    @staticmethod
+    def _normalize_path(path: Union[str, Path]) -> Path:
+        """Resolve a path before case-aware identity comparisons."""
+        return Path(os.path.normcase(os.path.realpath(path, strict=False)))
+
+    @staticmethod
+    def _same_file(first: Path, second: Path, input_file: str) -> bool:
+        """Conservatively identify existing paths that refer to the same file."""
+        try:
+            return os.path.samefile(first, second)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ConversionError(
+                input_file,
+                f"Unable to compare output path identity: {exc}",
+                exc,
+            ) from exc
+
     def _validate_output_path(self, output_path: Path, input_file: str) -> None:
         """Validate output path safety constraints before writing files."""
         if output_path.suffix.lower() != ".docx":
@@ -498,6 +642,26 @@ class MarkdownToDocxConverter:
                 input_file,
                 f"Refusing to write through symlink output path: {output_path}",
             )
+
+        input_path = Path(input_file)
+        normalized_output = self._normalize_path(output_path)
+        if normalized_output == self._normalize_path(input_path) or self._same_file(
+            output_path, input_path, input_file
+        ):
+            raise ConversionError(
+                input_file,
+                f"Input and output paths must be different: {output_path}",
+            )
+
+        if self.reference_doc is not None:
+            reference_path = Path(self.reference_doc)
+            if normalized_output == self._normalize_path(
+                reference_path
+            ) or self._same_file(output_path, reference_path, input_file):
+                raise ConversionError(
+                    input_file,
+                    f"Output path must be different from the reference template: {output_path}",
+                )
 
     def _build_pandoc_args(
         self, *, toc: bool, toc_depth: int, extra_args: Optional[Sequence[str]]

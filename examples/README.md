@@ -18,11 +18,11 @@ No template is needed. The first run downloads missing approved fonts to the app
 uv run python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
 ```
 
-GitHub Actions retains per-platform `multilingual-<OS>` artifacts; Linux additionally renders pages and checks expected PDF fonts. Artifacts are available from the workflow run's summary. Rendering is evidence for inspection, not automatic approval of Arabic shaping or layout. Check the previews and open the DOCX in Word/LibreOffice before a release.
+GitHub Actions retains required per-platform `evidence-<OS>` artifacts containing the DOCX, JSON report, JUnit, coverage, wheel and sdist. Linux additionally renders pages and checks expected PDF fonts, uploaded as optional `preview-<OS>` artifacts. Artifacts are available from the workflow run's summary. Rendering is evidence for inspection, not automatic approval of Arabic shaping or layout. Check the previews and open the DOCX in Word/LibreOffice before a release.
 
 [`example.md`](example.md) remains a general Markdown example. Emoji in that legacy fixture are explicitly outside full font/display verification.
 
-综合样例可用于检查所有首批语言在同一个文件、同段落和同表格单元格中的混排。CI 上传 DOCX、报告和 Linux 页面预览；字体仅在缓存时需要另行安装，人工展示验收与自动结构检查分别记录。
+综合样例可用于检查所有首批语言在同一个文件、同段落和同表格单元格中的混排。CI 上传必需的 `evidence-<OS>` 产物和可选的 Linux `preview-<OS>` 页面预览；字体仅在缓存时需要另行安装，人工展示验收与自动结构检查分别记录。
 
 The TOC is a Word field: refresh it in Word/LibreOffice to populate entries. The headless PDF preview may show only the contents heading until fields are updated.
 

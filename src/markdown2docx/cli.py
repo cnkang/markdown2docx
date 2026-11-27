@@ -91,6 +91,11 @@ Configuration:
     )
 
     parser.add_argument(
+        "--untrusted",
+        action="store_true",
+        help="Use mandatory restricted resources and offline fonts for untrusted input",
+    )
+    parser.add_argument(
         "--resources-offline",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -282,6 +287,7 @@ def handle_conversion(
     allow_unverified_fonts: bool | None = None,
     resources_offline: bool | None = None,
     restricted: bool | None = None,
+    untrusted: bool = False,
     render: bool = False,
     preview_dir: Path | None = None,
 ) -> int:
@@ -304,7 +310,12 @@ def handle_conversion(
         # Initialize converter
         converter = MarkdownToDocxConverter(reference_doc=template_path, config=config)
 
-        report = converter.convert_with_report(
+        conversion = (
+            converter.convert_untrusted_with_report
+            if untrusted
+            else converter.convert_with_report
+        )
+        report = conversion(
             input_path,
             output_path,
             toc=toc,
@@ -480,6 +491,7 @@ def main() -> None:
         allow_unverified_fonts=args.allow_unverified_fonts,
         resources_offline=args.resources_offline,
         restricted=args.restricted,
+        untrusted=args.untrusted,
         render=args.render,
         preview_dir=args.preview_dir,
     )

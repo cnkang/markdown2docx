@@ -138,7 +138,7 @@ uv run python scripts/validate_multilingual.py --offline --output-dir artifacts/
 uv run python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
 ```
 
-Actions 在 Linux、macOS、Windows 上执行转换和检查。临时 Linux runner 会安装已核实的样例字体，生成 PDF 和页面预览，检查 PDF 是否使用预期 CJK、阿拉伯及拉丁字体，上传 `multilingual-<OS>` 产物。人工仍需检查阿拉伯语连接、标点位置和分页。Word/LibreOffice 人工展示检查属于发布门槛；配置了 CI 不等于全部平台已经通过。
+Actions 在 Linux、macOS、Windows 上执行转换和检查。临时 Linux runner 会安装已核实的样例字体，生成 PDF 和页面预览，检查 PDF 是否使用预期 CJK、阿拉伯及拉丁字体。必需的 `evidence-<OS>` 产物包含 DOCX、JSON 报告、JUnit、覆盖率和分发文件；可选的 `preview-<OS>` 产物包含 Linux 页面预览。人工仍需检查阿拉伯语连接、标点位置和分页。Word/LibreOffice 人工展示检查属于发布门槛；配置了 CI 不等于全部平台已经通过。
 
 更多示例见 [examples](examples/README.md)，行为变化见 [CHANGELOG](CHANGELOG.md)。
 
@@ -150,12 +150,26 @@ Actions 在 Linux、macOS、Windows 上执行转换和检查。临时 Linux runn
 
 显式指定不存在的配置文件、未知配置键、错误类型和越界值会在转换前失败。每个转换器持有独立的配置快照。`pandoc.timeout_seconds` 分别限制解析、参考模板提取和 DOCX 写出阶段；超时使用 `PANDOC_TIMEOUT`，保留已有 DOCX。字体下载的读取时限为 60 秒、缓存锁等待为 120 秒；LibreOffice 与页面栅格化各有 120 秒时限。当前不提供整个任务共享的总时限。
 
-`--offline` 仅禁止字体下载。`--resources-offline` 另外拒绝远程图片；`--restricted` 限制图片位于输入文档目录内，将图片复制到私有转换目录，并禁止 raw 内容与任意过滤器/defaults 参数。它是资源使用策略，不能替代操作系统沙箱；Windows 图片复制仍依赖调用方对本地文件目录的信任。可信 API 调用方可在普通模式下使用明确的 Pandoc 扩展参数，输入/输出格式与模板保留参数始终禁止覆盖。
+`--offline` 仅禁止**字体**下载，不限制文档资源。`--resources-offline` 拒绝远程图片；`--restricted` 还会限制图片位于输入文档目录内，将图片复制到私有转换目录，并禁止 raw 内容与任意过滤器/defaults 参数。字体 offline 与资源 offline 是相互独立的策略，可以分别配置。
+
+处理来源不可信的 Markdown 时，请使用 `--untrusted`、`converter.convert_untrusted(...)`、`converter.convert_untrusted_with_report(...)`，或包级 `convert_untrusted(...)` / `convert_untrusted_with_report(...)` 辅助函数：
+
+```bash
+uv run markdown2docx input.md --untrusted --json
+```
+
+```python
+from markdown2docx import convert_untrusted_with_report
+
+report = convert_untrusted_with_report("input.md", "output.docx")
+```
+
+不可信入口始终强制 `restricted=True`、`resources_offline=True` 和 `offline=True`，调用参数或配置不能削弱这些设置。显式传入这三个选项的 `False` 会抛出 `ConfigurationError`；`None` 与 `True` 可接受。策略拒绝时退出码为 1；配合 `--json` 返回稳定的 `CONVERSION_FAILED` JSON 错误，且不发布 DOCX。普通 `convert()` / `convert_with_report()` 保留可信调用方语义，包括显式使用 Pandoc 扩展。Windows 的资源校验与复制会逐组件固定路径，并在读取图片前拒绝 reparse point。这仍是资源使用策略，不是操作系统沙箱。输入/输出格式与模板保留参数始终禁止覆盖。
 
 可通过 `[limits]` 配置 `input_bytes`（默认 64 MiB）、`archive_bytes`（512 MiB）、`archive_entries`（10000）、`xml_bytes`（64 MiB）与 `preview_pages`（200）。超过限额会明确失败，不截断正文。`conversion.create_backup=true` 暂不支持，会明确报错；请显式保存历史输出。`logging.file_path` 可设置 CLI 日志文件。必要完整性检查始终执行。
 
 所有 CLI 模式使用同一转换流程；`--quiet` 不输出成功提示或 INFO，JSON stdout 仅包含结果。新建 CLI 模板默认没有样例正文，使用 `--template-sample` 显式添加。报告增加 `schema_version`、`conversion_id`、`timings` 和 `tools`，协议见 [JSON schema](src/markdown2docx/report_schema.json)。预览保存在 `generation-*` 子目录，按数字页号排序，失败不会删除上一批预览；消费者应使用报告里的路径。历史 generation 由使用方按保留策略清理。
 
-开发使用 uv 锁文件、Ruff、mypy、pytest 和 Bandit。`make quality` 与 pre-commit/CI 使用相同版本和扫描范围。先运行 `scripts/prepare_fonts.py` 准备已校验字体，再执行测试；测试中的 Python 下载必须显式 mock。CLI 子进程测试也依赖预先准备的字体缓存。默认 pytest 不生成覆盖率文件，CI 单独采集分支覆盖率。`scripts/benchmark_conversion.py` 输出字符分片和各转换阶段的重复测量中位数。
+开发使用 uv 锁文件、Ruff、mypy、pytest 和 Bandit。`make quality` 与 pre-commit/CI 使用相同版本和扫描范围；CI 同时运行 actionlint v1.7.7。先运行 `scripts/prepare_fonts.py` 准备已校验字体，再执行测试；测试中的 Python 下载必须显式 mock。CLI 子进程测试也依赖预先准备的字体缓存。默认 pytest 不生成覆盖率文件，CI 单独采集分支覆盖率。`scripts/benchmark_conversion.py` 输出字符分片和各转换阶段的重复测量中位数。
 
-CI 在三平台构建 wheel 并从仓库外的干净环境验收安装包，同时按 SHA-256 校验 Pandoc 资产。`Publish distribution` 是手动发布流程：在包含该 workflow 的已评审 `vX.Y.Z` tag 上启动，输入相同 release tag，先通过 TestPyPI，再选择 PyPI。仓库管理员需预先配置对应环境、必要人工审批和 PyPI Trusted Publisher；此代码变更不会自动发布。发布提供 OIDC 与产物来源证明。Agent 的固定执行包仍是先前已验收版本，功能更新应在新执行 commit 实际发布并验收后更新 pin。
+CI 在三平台构建 wheel 并从仓库外的干净环境验收安装包，同时按 SHA-256 校验 Pandoc 资产。必需的 JUnit、覆盖率、多语言、分发和 skill-smoke 产物缺失时门禁失败；页面预览仍为可选。`Publish distribution` 是手动发布流程：在包含该 workflow 的已评审 `vX.Y.Z` tag 上启动，输入相同 release tag。发布流程先在触发 commit 上调用同一个可复用 `Test` workflow；`build` 等待质量检查、真实 Agent skill smoke 和 Linux/macOS/Windows 测试矩阵全部通过后，才构建并校验 wheel 与 sdist，随后进入 `publish`。先通过 TestPyPI，再选择 PyPI。仓库管理员需预先配置对应环境、必要人工审批和 PyPI Trusted Publisher；此代码变更不会自动发布。发布提供 OIDC 与产物来源证明。Agent 的执行 pin 固定为已评审的 remediation commit，即已评审、安全加固的远端基线 `bac6731231a38f9873fd1dfeba02ce1c8a448a76`，不可变；本次变更继续使用该合并前基线，仅在本变更合并后的后续 commit 中，待新的执行 commit 实际发布并验收后再更新 pin。

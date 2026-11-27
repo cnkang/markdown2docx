@@ -10,6 +10,8 @@
 - Publish isolated preview generations, preserve previous results on failure, and sort pages numerically.
 - Version report schemas and record conversion IDs, actual tool versions and stage timings.
 - Use locked Ruff/mypy/pytest/Bandit checks, checksum-pinned Pandoc installs, offline fixture preparation, installed-wheel smoke tests and manual OIDC publishing workflows.
+- Gate manual release builds and publication on the same-SHA reusable quality, real skill smoke and three-platform test workflow with stable fail-closed step contracts, pinned actionlint and required evidence artifacts.
+- Verify custom TOC title fragments against their assigned script fonts, model smart punctuation and every table caption position, create Windows workspaces atomically, and replace rerun evidence artifacts.
 
 Compatibility: missing/invalid explicit configurations now fail instead of silently falling back. Mutating the configuration passed to an existing converter no longer changes that converter. CLI templates omit sample content unless `--template-sample` is requested. Preview paths now point into generation directories. `create_backup=true` is rejected because it was not implemented. Each Pandoc stage has its own timeout rather than a shared task deadline.
 

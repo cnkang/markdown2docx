@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
+import stat
 
 # controlled argv, shell=False
 import subprocess  # nosec B404
-import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .fonts import FontResolver, cache_directory, system_font_directories
+from .output import (
+    PinnedDirectory,
+    pinned_directory,
+    secure_temporary_directory,
+)
 
 
 @dataclass
@@ -41,10 +47,146 @@ class ConversionReport:
         return {"status": "success", **asdict(self)}
 
 
+def _entry_names(directory: PinnedDirectory) -> list[str]:
+    if os.name == "nt":
+        return sorted(entry.name for entry in directory.path.iterdir())
+    with os.scandir(directory.descriptor) as entries:
+        return sorted(entry.name for entry in entries)
+
+
+def _copy_regular(source: int, target: int) -> None:
+    try:
+        details = os.fstat(source)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(source)
+        with contextlib.suppress(OSError):
+            os.close(target)
+        raise
+    if not stat.S_ISREG(details.st_mode):
+        with contextlib.suppress(OSError):
+            os.close(source)
+        with contextlib.suppress(OSError):
+            os.close(target)
+        raise OSError("Preview source is not a regular file")
+    try:
+        original = os.fdopen(source, "rb")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(source)
+        with contextlib.suppress(OSError):
+            os.close(target)
+        raise
+    try:
+        destination = os.fdopen(target, "wb")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            original.close()
+        with contextlib.suppress(OSError):
+            os.close(target)
+        raise
+    with original, destination:
+        shutil.copyfileobj(original, destination)
+
+
+def _copy_generation(source: PinnedDirectory, target: PinnedDirectory) -> None:
+    """Copy a completed private generation into destination-filesystem staging."""
+    for name in _entry_names(source):
+        try:
+            child = source.open_directory(name)
+        except OSError:
+            source_descriptor = source.open_regular(name)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if os.name != "nt":
+                flags |= os.O_NOFOLLOW
+            try:
+                target_descriptor = target.open_file(name, flags)
+            except BaseException:
+                os.close(source_descriptor)
+                raise
+            _copy_regular(source_descriptor, target_descriptor)
+        else:
+            try:
+                target.make_directory(name)
+                target_child = target.open_directory(name)
+            except BaseException:
+                os.close(child)
+                raise
+            try:
+                _copy_generation(
+                    PinnedDirectory(source.path / name, child),
+                    PinnedDirectory(target.path / name, target_child),
+                )
+            finally:
+                os.close(child)
+                os.close(target_child)
+
+
+def _publish_generation(generation: PinnedDirectory, target: PinnedDirectory) -> Path:
+    """Atomically expose a generation through the pinned publication directory."""
+    staging_name = f".preview-publish-{uuid.uuid4().hex}"
+    published_name = f"generation-{uuid.uuid4().hex}"
+    target.make_directory(staging_name)
+    try:
+        staging_descriptor = target.open_directory(staging_name)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            target.remove_entry(staging_name)
+        raise
+    try:
+        staging_path = target.current_path() / staging_name
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(staging_descriptor)
+        with contextlib.suppress(OSError):
+            target.remove_entry(staging_name)
+        raise
+    staging = PinnedDirectory(staging_path, staging_descriptor)
+    published = False
+    entry_name = staging_name
+    staging_closed = False
+    try:
+        _copy_generation(generation, staging)
+        if os.name == "nt":
+            os.close(staging_descriptor)
+            staging_closed = True
+            os.replace(staging.path, target.path / published_name)
+            published_path = target.path / published_name
+        else:
+            staging.assert_pinned()
+            os.rename(
+                staging_name,
+                published_name,
+                src_dir_fd=target.descriptor,
+                dst_dir_fd=target.descriptor,
+            )
+            entry_name = published_name
+            published_path = target.current_path() / published_name
+        published = True
+    finally:
+        try:
+            if not published:
+                if os.name == "nt":
+                    if not staging_closed:
+                        os.close(staging_descriptor)
+                        staging_closed = True
+                    with contextlib.suppress(FileNotFoundError):
+                        shutil.rmtree(staging.path)
+                else:
+                    staging.cleanup()
+        finally:
+            if not staging_closed:
+                os.close(staging_descriptor)
+            if not published:
+                with contextlib.suppress(OSError):
+                    target.remove_entry(entry_name)
+    return published_path
+
+
 def render_preview(
     path: Path, output_dir: Path, resolver: FontResolver, *, max_pages: int = 200
 ) -> dict[str, Any]:
-    """Render only when the renderer can use verified system-installed fonts."""
+    """Render privately, then publish through a fixed destination descriptor."""
     if any(font.source != "system" for font in resolver.selected.values()):
         return {
             "status": "unverified",
@@ -54,85 +196,106 @@ def render_preview(
     if not binary:
         return {"status": "unverified", "reason": "LibreOffice is unavailable"}
     try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if output_dir.is_symlink():
-            raise OSError("Preview directory must not be a symlink")
-        # Immutable generation directories isolate concurrent and failed renders.
-        with tempfile.TemporaryDirectory(
-            prefix=".render-", dir=output_dir
-        ) as temporary:
-            root = Path(temporary)
-            profile = (root / "profile").as_uri()
-            # tool executable and argv, no shell
-            result = subprocess.run(  # nosec B603
-                [
-                    binary,
-                    f"-env:UserInstallation={profile}",
-                    "--headless",
-                    "--convert-to",
-                    "pdf",
-                    "--outdir",
-                    str(root),
-                    str(path.absolute()),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            pdf = root / path.with_suffix(".pdf").name
-            if result.returncode or not pdf.is_file():
-                return {"status": "failed", "reason": result.stderr or result.stdout}
-            generation = root / "generation"
-            generation.mkdir()
-            destination = generation / "preview.pdf"
-            shutil.copyfile(pdf, destination)
-            images: list[str] = []
-            raster = shutil.which("pdftoppm")
-            if raster:
+        with pinned_directory(output_dir) as publication:
+            with secure_temporary_directory(
+                prefix=".render-", directory=output_dir if os.name == "nt" else None
+            ) as rendering:
+                root = rendering.path
+                profile = (root / "profile").as_uri()
+                rendering.assert_pinned()
                 # tool executable and argv, no shell
-                rasterized = subprocess.run(  # nosec B603
+                result = subprocess.run(  # nosec B603
                     [
-                        raster,
-                        "-png",
-                        "-l",
-                        str(max_pages + 1),
-                        "-r",
-                        "100",
-                        str(destination),
-                        str(generation / "page"),
+                        binary,
+                        f"-env:UserInstallation={profile}",
+                        "--headless",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        str(root),
+                        str(path.absolute()),
                     ],
                     capture_output=True,
+                    text=True,
                     timeout=120,
                 )
-                if rasterized.returncode == 0:
-                    images = [
-                        str(p.absolute())
-                        for p in sorted(
-                            generation.glob("page-*.png"),
-                            key=lambda p: int(p.stem.split("-")[-1]),
+                rendering.assert_pinned()
+                if result.returncode:
+                    return {
+                        "status": "failed",
+                        "reason": result.stderr or result.stdout,
+                    }
+                pdf_name = path.with_suffix(".pdf").name
+                pdf_descriptor = rendering.open_regular(pdf_name)
+                pdf_open = True
+                try:
+                    rendering.make_directory("generation")
+                    generation_descriptor = rendering.open_directory("generation")
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        os.close(pdf_descriptor)
+                    raise
+                generation = PinnedDirectory(root / "generation", generation_descriptor)
+                try:
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    if os.name != "nt":
+                        flags |= os.O_NOFOLLOW
+                    destination_descriptor = generation.open_file("preview.pdf", flags)
+                    pdf_open = False
+                    _copy_regular(pdf_descriptor, destination_descriptor)
+                    images: list[str] = []
+                    raster = shutil.which("pdftoppm")
+                    if raster:
+                        rendering.assert_pinned()
+                        # tool executable and argv, no shell
+                        rasterized = subprocess.run(  # nosec B603
+                            [
+                                raster,
+                                "-png",
+                                "-l",
+                                str(max_pages + 1),
+                                "-r",
+                                "100",
+                                str(generation.path / "preview.pdf"),
+                                str(generation.path / "page"),
+                            ],
+                            capture_output=True,
+                            timeout=120,
                         )
-                    ]
-                else:
+                        if rasterized.returncode:
+                            return {
+                                "status": "failed",
+                                "reason": "PDF page rasterization failed",
+                                "pdf_generated": True,
+                            }
+                        images = [
+                            name
+                            for name in _entry_names(generation)
+                            if name.startswith("page-") and name.endswith(".png")
+                        ]
+                        images.sort(
+                            key=lambda name: int(Path(name).stem.split("-")[-1])
+                        )
+                        if len(images) > max_pages:
+                            return {
+                                "status": "failed",
+                                "reason": f"Preview exceeds {max_pages} pages",
+                                "pdf_generated": True,
+                            }
+                    published = _publish_generation(generation, publication)
                     return {
-                        "status": "failed",
-                        "reason": "PDF page rasterization failed",
-                        "pdf_generated": True,
+                        "status": "rendered",
+                        "pdf": str(published / "preview.pdf"),
+                        "pages": [str(published / name) for name in images],
+                        "rasterization": "passed" if raster else "unavailable",
+                        "visual_review": "required",
                     }
-                if len(images) > max_pages:
-                    return {
-                        "status": "failed",
-                        "reason": f"Preview exceeds {max_pages} pages",
-                        "pdf_generated": True,
-                    }
-            published = output_dir / f"generation-{uuid.uuid4().hex}"
-            os.replace(generation, published)
-            return {
-                "status": "rendered",
-                "pdf": str((published / "preview.pdf").absolute()),
-                "pages": [str((published / Path(p).name).absolute()) for p in images],
-                "rasterization": "passed" if raster else "unavailable",
-                "visual_review": "required",
-            }
+                finally:
+                    try:
+                        if pdf_open:
+                            os.close(pdf_descriptor)
+                    finally:
+                        os.close(generation_descriptor)
 
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "failed", "reason": str(exc)}

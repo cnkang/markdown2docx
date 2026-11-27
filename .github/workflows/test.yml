@@ -3,6 +3,7 @@ name: Test
 on:
   push:
   pull_request:
+  workflow_call:
 
 concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
@@ -16,14 +17,126 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          version: "0.12.23"
+          fetch-depth: 0
+      - id: setup-uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          version: "0.13.6"
           enable-cache: true
-      - run: uv sync --locked --group dev --group test
-      - run: make quality
-      - run: uv run --locked pre-commit run --all-files
+      - id: install-dependencies
+        run: uv sync --locked --group dev --group test
+      - id: launcher-contract
+        name: Smoke test agent skill launcher
+        run: |
+          uv run --locked python - <<'PY'
+          import importlib.util
+          import re
+          import subprocess
+          from pathlib import Path
+
+          launcher_path = Path("skills/markdown-to-docx/scripts/run.py")
+          spec = importlib.util.spec_from_file_location("skill_launcher", launcher_path)
+          assert spec is not None and spec.loader is not None
+          launcher = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(launcher)
+          assert re.fullmatch(r"[0-9a-f]{40}", launcher.EXECUTION_REVISION)
+          subprocess.run(
+              ["git", "cat-file", "-e", f"{launcher.EXECUTION_REVISION}^{{commit}}"],
+              check=True,
+          )
+          PY
+          uv run --locked pytest tests/test_skill.py
+      - id: quality
+        run: make quality
+      - id: actionlint
+        name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - id: pre-commit
+        run: uv run --locked pre-commit run --all-files
+  skill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - id: setup-uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+        with:
+          version: "0.13.6"
+          enable-cache: true
+      - id: install-dependencies
+        name: Install dependencies
+        run: uv sync --locked --group dev
+      - id: install-pandoc
+        name: Install checksum-pinned Pandoc
+        run: uv run --locked python scripts/install_pandoc.py --github-env
+      - id: prepare-fonts
+        name: Prepare verified fonts
+        run: uv run --locked python scripts/prepare_fonts.py
+      - id: skill-smoke
+        name: Smoke test the real agent skill launcher
+        run: |
+          set -e
+          set -o pipefail
+          mkdir -p artifacts/skill-smoke
+          cat > artifacts/skill-smoke/input.md <<'MD'
+          # Skill smoke
+
+          This is a minimal Markdown to DOCX conversion.
+          MD
+          python skills/markdown-to-docx/scripts/run.py --version | tee artifacts/skill-smoke/version.txt
+          python skills/markdown-to-docx/scripts/run.py --doctor --json | tee artifacts/skill-smoke/doctor.json
+          python skills/markdown-to-docx/scripts/run.py artifacts/skill-smoke/input.md -o artifacts/skill-smoke/output.docx --offline --json | tee artifacts/skill-smoke/report.json
+          python - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          root = Path("artifacts/skill-smoke")
+          version = (root / "version.txt").read_text(encoding="utf-8").strip()
+          assert version.startswith("markdown2docx "), version
+          doctor = json.loads((root / "doctor.json").read_text(encoding="utf-8"))
+          assert str(doctor["pandoc"]).startswith("3.12"), doctor
+          report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+          assert report["status"] == "success", report
+          assert all(
+              report["checks"][name] == "passed"
+              for name in (
+                  "structure",
+                  "text_integrity",
+                  "font_coverage",
+                  "language_direction",
+              )
+          ), report["checks"]
+          output = root / "output.docx"
+          assert output.is_file() and output.stat().st_size > 0
+          with zipfile.ZipFile(output) as archive:
+              assert archive.testzip() is None
+              assert {"[Content_Types].xml", "word/document.xml"} <= set(archive.namelist())
+              document = ElementTree.fromstring(archive.read("word/document.xml"))
+          namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+          text = "\n".join(
+              "".join(node.text or "" for node in paragraph.findall(".//w:t", namespace))
+              for paragraph in document.findall(".//w:p", namespace)
+          )
+          assert "Skill smoke" in text, text
+          assert "minimal Markdown to DOCX conversion" in text, text
+          print("Real agent skill launcher smoke passed")
+          PY
+      - id: skill-smoke-artifacts
+        name: Upload required agent skill smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: skill-smoke
+          path: artifacts/skill-smoke/
+          if-no-files-found: error
   test:
     needs: quality
     timeout-minutes: 25
@@ -38,26 +151,41 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install uv
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: setup-uv
+        name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.12.23"
+          version: "0.13.6"
           enable-cache: true
-      - name: Install dependencies
+      - id: install-dependencies
+        name: Install dependencies
         run: uv sync --locked --group dev
-      - name: Install checksum-pinned Pandoc
+      - id: install-pandoc
+        name: Install checksum-pinned Pandoc
         run: uv run --locked python scripts/install_pandoc.py --github-env
-      - name: Prepare verified fonts before offline tests
+      - id: prepare-fonts
+        name: Prepare verified fonts before offline tests
         run: uv run --locked python scripts/prepare_fonts.py
-      - name: Run regression and mixed-language tests
-        run: uv run --locked pytest --cov=src --cov-branch --cov-report=xml --cov-report=term-missing
-      - name: Validate the comprehensive Markdown fixture
+      - id: matrix-test
+        name: Run regression and mixed-language tests
+        run: uv run --locked pytest --cov=src --cov-branch --cov-report=xml --cov-report=term-missing --junitxml=artifacts/junit.xml
+      - id: windows-junit-gate
+        name: Audit Windows test skips
+        if: runner.os == 'Windows'
+        run: uv run --locked python scripts/check_test_skips.py artifacts/junit.xml
+      - id: multilingual-validation
+        name: Validate the comprehensive Markdown fixture
         run: uv run --locked python scripts/validate_multilingual.py --offline --output-dir artifacts/multilingual
-      - name: Install rendering dependencies
+      - id: install-rendering-dependencies
+        name: Install rendering dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libreoffice-writer poppler-utils fontconfig
-      - name: Install verified fixture fonts in the disposable Linux runner
+      - id: install-linux-fixture-fonts
+        name: Install verified fixture fonts in the disposable Linux runner
         if: runner.os == 'Linux'
         run: |
           uv run --locked python - <<'PY'
@@ -71,27 +199,42 @@ jobs:
               shutil.copy2(font['path'], destination / Path(font['path']).name)
           PY
           fc-cache -f
-      - name: Render and verify expected PDF fonts
+      - id: render-multilingual
+        name: Render and verify expected PDF fonts
         if: runner.os == 'Linux'
         run: uv run --locked python scripts/validate_multilingual.py --offline --render --output-dir artifacts/multilingual
-      - name: Build distribution and test installed wheel
+      - id: wheel-validation
+        name: Build and validate wheel and sdist distributions
         run: |
           uv build --out-dir artifacts/dist
-          uv venv artifacts/wheel-env --python 3.14
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            WHEEL_PYTHON="artifacts/wheel-env/Scripts/python.exe"
+          uv export --locked --no-dev --no-emit-project --no-hashes --output-file artifacts/wheel-constraints.txt
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            uv run --locked python scripts/validate_wheel.py --dist-dir artifacts/dist --constraints artifacts/wheel-constraints.txt
           else
-            WHEEL_PYTHON="artifacts/wheel-env/bin/python"
+            uv run --locked python scripts/validate_wheel.py --dist-dir artifacts/dist --constraints artifacts/wheel-constraints.txt --skip-sdist-rebuild
           fi
-          uv pip install --python "$WHEEL_PYTHON" artifacts/dist/*.whl
-          uv run --locked python scripts/validate_wheel.py --python "$WHEEL_PYTHON"
-      - name: Upload DOCX, report and Linux page previews
+      - id: check-test-evidence
+        name: Verify required test evidence
+        run: uv run --locked python scripts/check_test_evidence.py
+      - id: required-artifacts
+        name: Upload required test evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: multilingual-${{ runner.os }}
+          name: evidence-${{ runner.os }}
+          overwrite: true
           path: |
-            artifacts/multilingual/
+            artifacts/multilingual/multilingual.docx
+            artifacts/multilingual/report.json
             artifacts/dist/
+            artifacts/junit.xml
             coverage.xml
+          if-no-files-found: error
+      - id: preview-artifacts
+        name: Upload optional Linux page previews
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: preview-${{ runner.os }}
+          path: artifacts/multilingual/preview/
           if-no-files-found: warn

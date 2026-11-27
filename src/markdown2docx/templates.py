@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
@@ -26,6 +27,9 @@ from docx.shared import Cm, Inches, Pt
 from .config import DEFAULT_CONFIG, TemplateConfig
 from .exceptions import TemplateError
 from .output import staged_docx_output
+
+if TYPE_CHECKING:
+    from .output import PinnedDirectory
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -363,9 +367,17 @@ class DocxTemplateManager:
 
     @classmethod
     def create_reference(
-        cls, output_path: Path, config: TemplateConfig, *, timeout: int = 60
+        cls,
+        output_path: Path,
+        config: TemplateConfig,
+        *,
+        timeout: int = 60,
+        workspace: PinnedDirectory | None = None,
     ) -> Path:
         """Derive a content-free reference from the installed Pandoc defaults."""
+        if workspace is not None and output_path.absolute().parent != workspace.path:
+            raise ValueError("Reference output must be inside the supplied workspace")
+
         from docx.oxml.ns import qn
 
         from .runner import run_pandoc
@@ -375,8 +387,12 @@ class DocxTemplateManager:
             timeout=timeout,
             phase="reference",
         )
-        output_path.write_bytes(result.stdout)
-        doc = Document(str(output_path))
+        if workspace is None:
+            output_path.write_bytes(result.stdout)
+            doc = Document(str(output_path))
+        else:
+            workspace.write_bytes(output_path.name, result.stdout)
+            doc = Document(BytesIO(result.stdout))
         manager = cls(config=config)
         manager._configure_page_layout(doc)
         manager._configure_core_styles(doc)
@@ -412,7 +428,12 @@ class DocxTemplateManager:
         for child in list(body):
             if child.tag != qn("w:sectPr"):
                 body.remove(child)
-        doc.save(str(output_path))
+        if workspace is None:
+            doc.save(str(output_path))
+        else:
+            serialized = BytesIO()
+            doc.save(serialized)
+            workspace.write_bytes(output_path.name, serialized.getvalue(), replace=True)
         return output_path
 
     @classmethod
