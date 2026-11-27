@@ -3,6 +3,7 @@
 import ctypes
 import ntpath
 import os
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -400,12 +401,17 @@ def test_conversion_workspace_replacement_cannot_capture_ast_resources_or_refere
     monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
     monkeypatch.setattr(converter_module, "write_docx", stop_writer)
 
-    with pytest.raises(ConversionError):
-        MarkdownToDocxConverter().convert_untrusted(source, output)
+    try:
+        with pytest.raises(ConversionError):
+            MarkdownToDocxConverter().convert_untrusted(source, output)
 
-    assert attack["directory"] is not None
-    assert not list(attack["directory"].iterdir())
-    assert not output.exists()
+        assert attack["directory"] is not None
+        assert not list(attack["directory"].iterdir())
+        assert not output.exists()
+    finally:
+        for path in attack.values():
+            if path is not None and path.exists():
+                shutil.rmtree(path)
 
 
 @posix_only
@@ -614,14 +620,12 @@ def test_windows_workspace_write_uses_reparse_safe_helper(
     canary = tmp_path / "canary.docx"
     canary.write_bytes(b"protected")
     reference = tmp_path / "reference.docx"
-    if replace:
-        reference.symlink_to(canary)
     actual = tmp_path / "actual.docx"
     calls = []
 
     def writable(path, *, replace):
         calls.append((path, replace))
-        if path.is_symlink():
+        if replace:
             raise OSError("Refusing resource reparse point")
         return os.open(actual, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 

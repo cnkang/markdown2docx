@@ -74,6 +74,20 @@ def _effective_table_caption_position(arguments: Sequence[str]) -> str:
     return position
 
 
+def _writer_flags(arguments: Sequence[str]) -> tuple[bool, bool]:
+    """Interpret the TOC and numbering switches in Pandoc command-line order."""
+    toc = number_sections = False
+    for argument in arguments:
+        name, separator, value = argument.partition("=")
+        if name in {"--toc", "--table-of-contents"}:
+            toc = not separator or value == "true"
+        elif name == "--number-sections":
+            number_sections = not separator or value == "true"
+        elif name in {"-N", "--number-offset"}:
+            number_sections = True
+    return toc, number_sections
+
+
 @contextlib.contextmanager
 def _conversion_workspace(
     input_path: Path, output_path: Path
@@ -404,21 +418,18 @@ class MarkdownToDocxConverter:
                     family, allow_unverified=allow
                 )
         toc_metadata = metadata.get("toc")
-        effective_toc = (
-            toc
-            or (
-                isinstance(toc_metadata, dict)
-                and toc_metadata.get("t") == "MetaBool"
-                and bool(toc_metadata.get("c"))
-            )
-            or "--toc" in args
+        writer_toc, number_sections = _writer_flags(args)
+        effective_toc = writer_toc or (
+            isinstance(toc_metadata, dict)
+            and toc_metadata.get("t") == "MetaBool"
+            and bool(toc_metadata.get("c"))
         )
         document = MultilingualDocument(
             ast,
             resolver,
             lang=document_lang,
             base_direction=document_dir,
-            number_sections="--number-sections" in args,
+            number_sections=number_sections,
             table_caption_position=_effective_table_caption_position(args),
         )
         document.code_size_pt = self.config.template.code_size_pt

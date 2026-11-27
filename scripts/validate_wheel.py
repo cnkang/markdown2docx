@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import io
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -53,12 +54,6 @@ MAX_TAR_EXTENSION_MEMBER_BYTES = 8 * 1024 * 1024
 MAX_TAR_EXTENSION_BYTES = 32 * 1024 * 1024
 MAX_TAR_PHYSICAL_HEADERS = 20_000
 MAX_TAR_DECLARED_BYTES = 320 * 1024 * 1024
-WINDOWS_DEVICE_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{index}" for index in range(1, 10)}
-    | {f"LPT{index}" for index in range(1, 10)}
-    | {"COM\u00b9", "COM\u00b2", "COM\u00b3", "LPT\u00b9", "LPT\u00b2", "LPT\u00b3"}
-)
 WINDOWS_83_ALIAS = re.compile(
     r"^(?P<base>[A-Za-z0-9_$!#%&'()@^`{}-]{1,6})~[1-9][0-9]*"
     r"(?:\.(?P<extension>[A-Za-z0-9]{1,3}))?$"
@@ -120,6 +115,7 @@ class WheelInfo:
 class SdistInfo:
     path: Path
     version: str
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -158,16 +154,9 @@ def _safe_member_name(name: str) -> PurePosixPath:
 def _archive_member_path(name: str) -> PurePosixPath:
     path = _safe_member_name(name)
     for part in path.parts:
-        if part.endswith((" ", ".")):
+        if ":" in part or ntpath.isreserved(part):
             raise DistributionError(
-                f"Unsafe Windows trailing space or dot in archive member: {name!r}"
-            )
-        if ":" in part:
-            raise DistributionError(f"Unsafe Windows colon in archive member: {name!r}")
-        device_name = part.split(".", 1)[0].upper()
-        if device_name in WINDOWS_DEVICE_NAMES:
-            raise DistributionError(
-                f"Unsafe Windows reserved device name in archive member: {name!r}"
+                f"Unsafe Windows path component in archive member: {name!r}"
             )
     return path
 
@@ -347,19 +336,22 @@ def _read_stream_bounded(stream: BinaryIO, max_bytes: int, label: str) -> bytes:
     return b"".join(chunks)
 
 
-def _preflight_zip(path: Path) -> None:
+def _preflight_zip(path: Path, stream: BinaryIO | None = None) -> None:
     _require_artifact(path, "wheel")
+    if stream is None:
+        with path.open("rb") as opened:
+            _preflight_zip(path, opened)
+        return
     try:
-        physical_size = path.stat().st_size
+        physical_size = os.fstat(stream.fileno()).st_size
         if physical_size > MAX_WHEEL_BYTES:
             raise DistributionError(
                 f"Wheel exceeds the physical archive size limit: {path}"
             )
         if physical_size < 22:
             raise DistributionError("Invalid wheel ZIP: missing its EOCD record")
-        with path.open("rb") as stream:
-            stream.seek(-min(physical_size, 22 + 65535), os.SEEK_END)
-            tail = stream.read()
+        stream.seek(-min(physical_size, 22 + 65535 + 20), os.SEEK_END)
+        tail = stream.read()
     except OSError as error:
         raise DistributionError(
             f"Unable to preflight wheel ZIP {path}: {error}"
@@ -393,10 +385,18 @@ def _preflight_zip(path: Path) -> None:
         raise DistributionError("Wheel ZIP EOCD record is truncated") from error
     if signature != b"PK\x05\x06" or comment_length != len(tail) - eocd_position - 22:
         raise DistributionError("Wheel ZIP EOCD record is invalid")
-    if 0xFFFF in {disk_entries, total_entries} or 0xFFFFFFFF in {
-        directory_size,
-        directory_offset,
-    }:
+    if (
+        0xFFFF in {disk_entries, total_entries}
+        or 0xFFFFFFFF
+        in {
+            directory_size,
+            directory_offset,
+        }
+        or (
+            eocd_position >= 20
+            and tail[eocd_position - 20 : eocd_position - 16] == b"PK\x06\x07"
+        )
+    ):
         raise DistributionError("ZIP64 wheels are not supported")
     if disk_number != 0 or directory_disk != 0 or disk_entries != total_entries:
         raise DistributionError("Multi-disk ZIP wheels are not supported")
@@ -413,13 +413,37 @@ def _preflight_zip(path: Path) -> None:
     eocd_offset = physical_size - len(tail) + eocd_position
     if directory_offset + directory_size > eocd_offset:
         raise DistributionError("Wheel ZIP central directory lies outside the archive")
+    stream.seek(eocd_offset - directory_size)
+    remaining = directory_size
+    entries = 0
+    while remaining:
+        header = stream.read(46)
+        if len(header) != 46 or header[:4] != b"PK\x01\x02":
+            raise DistributionError("Invalid wheel ZIP central-directory entry")
+        lengths = struct.unpack_from("<3H", header, 28)
+        entry_size = 46 + sum(lengths)
+        if entry_size > remaining:
+            raise DistributionError("Wheel ZIP central-directory entry is truncated")
+        entries += 1
+        if entries > MAX_WHEEL_MEMBERS:
+            raise DistributionError(
+                "Wheel exceeds the central-directory entry count limit"
+            )
+        stream.seek(entry_size - 46, os.SEEK_CUR)
+        remaining -= entry_size
+    if entries != total_entries:
+        raise DistributionError("Wheel ZIP central-directory entry count mismatch")
+
+
+def _open_preflighted_zip(path: Path, stream: BinaryIO) -> zipfile.ZipFile:
+    _preflight_zip(path, stream)
+    return zipfile.ZipFile(stream)
 
 
 def _read_wheel(path: Path) -> dict[str, bytes]:
     _require_artifact(path, "wheel")
     if path.suffix != ".whl":
         raise DistributionError(f"Expected a .whl artifact: {path}")
-    _preflight_zip(path)
     files = {}
     inventory = _ArchiveInventory(
         "Wheel",
@@ -428,10 +452,10 @@ def _read_wheel(path: Path) -> dict[str, bytes]:
         MAX_WHEEL_UNCOMPRESSED_BYTES,
     )
     try:
-        with zipfile.ZipFile(path) as archive:
+        with path.open("rb") as stream, _open_preflighted_zip(path, stream) as archive:
             for member in archive.infolist():
                 identity = inventory.add(
-                    member.filename, member.file_size, is_dir=member.is_dir()
+                    member.orig_filename, member.file_size, is_dir=member.is_dir()
                 )
                 if member.flag_bits & 1:
                     raise DistributionError(
@@ -590,7 +614,7 @@ def _verify_sdist_snapshot(snapshot: Path, expected_hash: str) -> None:
         raise DistributionError("Sdist snapshot hash verification failed")
 
 
-def _read_sdist(path: Path) -> dict[str, bytes]:
+def _read_sdist(path: Path, root_name: str) -> tuple[dict[str, bytes], str]:
     _require_artifact(path, "sdist")
     if not path.name.endswith(".tar.gz"):
         raise DistributionError(f"Expected a .tar.gz sdist artifact: {path}")
@@ -609,6 +633,10 @@ def _read_sdist(path: Path) -> dict[str, bytes]:
                     identity = inventory.add(
                         member.name, member.size, is_dir=member.isdir()
                     )
+                    if PurePosixPath(identity).parts[0] != root_name:
+                        raise DistributionError(
+                            f"Sdist must contain one project root: {root_name}"
+                        )
                     if not (member.isfile() or member.isdir()):
                         raise DistributionError(
                             f"Unsafe sdist member type: {member.name}"
@@ -630,7 +658,7 @@ def _read_sdist(path: Path) -> dict[str, bytes]:
         raise DistributionError(f"Invalid sdist archive {path}: {error}") from error
     if not files:
         raise DistributionError(f"Sdist artifact has no files: {path}")
-    return files
+    return files, snapshot_hash
 
 
 def _parse_metadata(data: bytes, label: str):
@@ -786,6 +814,7 @@ def validate_wheel(path: Path, expected_version: str) -> WheelInfo:
             f"Wheel entry_points.txt is missing: {entry_points_path}"
         )
     parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
     try:
         parser.read_string(files[entry_points_path].decode("utf-8"))
     except (UnicodeDecodeError, configparser.Error) as error:
@@ -796,6 +825,10 @@ def validate_wheel(path: Path, expected_version: str) -> WheelInfo:
         raise DistributionError(
             "Wheel entry_points.txt has no console_scripts section; expected "
             f"{CONSOLE_SCRIPT} = {CONSOLE_TARGET}"
+        )
+    if parser.defaults():
+        raise DistributionError(
+            "Wheel entry_points.txt must declare entries in their own sections"
         )
     console_scripts = dict(parser.items("console_scripts"))
     if console_scripts.get(CONSOLE_SCRIPT) != CONSOLE_TARGET:
@@ -860,15 +893,12 @@ def _validate_pyproject(data: bytes, expected_version: str) -> None:
 def validate_sdist(path: Path, expected_version: str) -> SdistInfo:
     """Validate the source archive's identity, build metadata, and key files."""
     path = Path(path)
-    files = _read_sdist(path)
     root_name = f"{PROJECT_NAME}-{expected_version}"
     if path.name != f"{root_name}.tar.gz":
         raise DistributionError(
-            f"Sdist filename does not match {PROJECT_NAME} {expected_version}: {path.name}"
+            f"Sdist artifact filename does not match {PROJECT_NAME} {expected_version}: {path.name}"
         )
-    roots = {PurePosixPath(name).parts[0] for name in files}
-    if roots != {root_name}:
-        raise DistributionError(f"Sdist must contain one project root: {root_name}")
+    files, snapshot_hash = _read_sdist(path, root_name)
     _reject_unwanted_members(tuple(files), wheel=False)
     for relative_path in REQUIRED_SDIST_FILES:
         required = f"{root_name}/{relative_path}"
@@ -882,7 +912,7 @@ def validate_sdist(path: Path, expected_version: str) -> SdistInfo:
     for name in REQUIRED_JSON_ASSETS:
         asset_path = f"{root_name}/src/{PROJECT_NAME}/{name}"
         _validate_json_asset(files[asset_path], name, "Sdist")
-    return SdistInfo(path=path, version=expected_version)
+    return SdistInfo(path=path, version=expected_version, sha256=snapshot_hash)
 
 
 def _sdist_target(root: Path, member_name: str) -> Path:
@@ -966,7 +996,9 @@ def _scan_sdist_archive(
     return roots.pop(), expected_contents
 
 
-def extract_sdist(path: Path, destination: Path) -> Path:
+def extract_sdist(
+    path: Path, destination: Path, *, expected_hash: str | None = None
+) -> Path:
     """Safely extract a bounded sdist beneath its single resolved project root."""
     _require_artifact(path, "sdist")
     if not path.name.endswith(".tar.gz"):
@@ -974,6 +1006,8 @@ def extract_sdist(path: Path, destination: Path) -> Path:
     destination = Path(destination)
     try:
         with _sdist_snapshot(path) as (snapshot, snapshot_hash):
+            if expected_hash is not None and snapshot_hash != expected_hash:
+                raise DistributionError("Sdist changed after distribution validation")
             root_name, expected_contents = _scan_sdist_archive(snapshot)
             _verify_sdist_snapshot(snapshot, snapshot_hash)
             root = destination / root_name
@@ -1340,7 +1374,7 @@ class DistributionDependencies:
         tempfile.TemporaryDirectory
     )
     install_and_smoke: Callable[..., None] = install_and_smoke
-    extract_sdist: Callable[[Path, Path], Path] = extract_sdist
+    extract_sdist: Callable[..., Path] = extract_sdist
     run: Callable[..., subprocess.CompletedProcess[str]] = _run
     select_artifact: Callable[[Path, str, str], Path] = _select_artifact
     validate_wheel: Callable[[Path, str], WheelInfo] = validate_wheel
@@ -1397,7 +1431,9 @@ def main(
                 print("Sdist content validated; rebuild skipped")
                 return 0
             extracted = dependencies.extract_sdist(
-                artifacts.sdist.path.resolve(), workspace / "sdist-source"
+                artifacts.sdist.path.resolve(),
+                workspace / "sdist-source",
+                expected_hash=artifacts.sdist.sha256,
             )
             rebuilt_directory = workspace / "rebuilt"
             rebuilt_directory.mkdir()

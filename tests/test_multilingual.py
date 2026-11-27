@@ -1407,6 +1407,40 @@ def test_section_number_style_is_verified_without_number_sections(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "arguments", [["-N"], ["--number-sections=true"], ["--number-offset", "2"]]
+)
+def test_pandoc_numbering_switches_are_verified(tmp_path, arguments):
+    source = tmp_path / "input.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    output = MarkdownToDocxConverter().convert(source, extra_args=arguments)
+    root = parts(output)["word/document.xml"]
+    assert root.xpath("//w:r[w:rPr/w:rStyle[@w:val='SectionNumber']]", namespaces=NS)
+
+
+def test_explicit_pandoc_toc_disable_overrides_converter_flag(tmp_path):
+    source = tmp_path / "input.md"
+    source.write_text("# Heading\n", encoding="utf-8")
+    output = MarkdownToDocxConverter().convert(
+        source, toc=True, extra_args=["--table-of-contents=false"]
+    )
+    root = parts(output)["word/document.xml"]
+    assert not root.xpath("//w:pStyle[@w:val='TOCHeading']", namespaces=NS)
+
+
+def test_duplicate_code_identifiers_preserve_both_code_blocks(tmp_path):
+    source = tmp_path / "input.md"
+    source.write_text(
+        "```{#shared}\nfirst\n```\n\n```{#shared}\nsecond\n```\n",
+        encoding="utf-8",
+    )
+    output = MarkdownToDocxConverter().convert(source)
+    root = parts(output)["word/document.xml"]
+    assert root.xpath(
+        "//w:p[w:pPr/w:pStyle[@w:val='SourceCode']]/w:r/w:t/text()", namespaces=NS
+    ) == ["first", "second"]
+
+
 @pytest.mark.parametrize("text", ["real", "123"])
 def test_user_section_number_style_survives_number_sections(tmp_path, text):
     source = tmp_path / "input.md"
@@ -1597,15 +1631,18 @@ def test_verify_output_rejects_structural_text_corruption(
             mutations["word/footnotes.xml"] = corrupt_footnotes
             mutations["word/document.xml"] = move_note_to_body
         rewrite_docx(candidate, mutations)
+        mutation_applied.append(True)
         verify(self, candidate)
 
+    mutation_applied = []
     monkeypatch.setattr(MultilingualDocument, "_verify_output", corrupt_then_verify)
     with pytest.raises(ValidationError):
         MarkdownToDocxConverter(config=config).convert(source, output, toc=toc)
+    assert mutation_applied == [True]
     assert output.read_bytes() == b"original"
 
 
-@pytest.mark.parametrize("mode", ["metadata", "args"])
+@pytest.mark.parametrize("mode", ["metadata", "--toc", "--table-of-contents=true"])
 @pytest.mark.parametrize("corruption", ["split", "merge"])
 def test_effective_toc_title_is_modeled_and_verified(
     tmp_path, monkeypatch, mode, corruption
@@ -1659,12 +1696,12 @@ def test_effective_toc_title_is_modeled_and_verified(
         verify(self, candidate)
 
     monkeypatch.setattr(MultilingualDocument, "_verify_output", corrupt_then_verify)
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="paragraph group"):
         MarkdownToDocxConverter().convert(
             source,
             output,
             toc=False,
-            extra_args=["--toc"] if mode == "args" else None,
+            extra_args=None if mode == "metadata" else [mode],
         )
     assert output.read_bytes() == b"original"
     assert seen_toc == [True]
@@ -1958,6 +1995,53 @@ def test_verify_output_independently_checks_actual_run_font(tmp_path, monkeypatc
     assert any(
         "font coverage mismatch" in message for message in error.value.validation_errors
     )
+
+
+def test_verify_output_uses_original_font_context_across_text_nodes(tmp_path):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    path = generated_docx(
+        tmp_path, "<w:r><w:t>ABC</w:t><w:t>—</w:t><w:t>中文</w:t></w:r>"
+    )
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": []}, FontResolver(), lang="ar"
+    )
+    assert document.apply(path)["font_coverage"] == "passed"
+    root = parts(path)["word/document.xml"]
+    assert root.xpath("//w:r[w:t='—']/w:rPr/w:rFonts/@w:ascii", namespaces=NS) == [
+        "Noto Sans"
+    ]
+
+
+@pytest.mark.parametrize("remove_break", [False, True])
+def test_verify_output_checks_break_only_paragraphs(
+    tmp_path, monkeypatch, remove_break
+):
+    from markdown2docx.multilingual import MultilingualDocument
+
+    document = MultilingualDocument(
+        {"meta": {}, "blocks": [{"t": "LineBlock", "c": [[], []]}]},
+        FontResolver(),
+        lang="en",
+    )
+    document.annotate()
+    path = generated_docx(tmp_path, "<w:r><w:br/></w:r>")
+    if remove_break:
+        verify = document._verify_output
+
+        def remove_break_then_verify(candidate):
+            def mutate(root):
+                line_break = next(root.iter(W + "br"))
+                line_break.getparent().remove(line_break)
+
+            rewrite_docx(candidate, {"word/document.xml": mutate})
+            verify(candidate)
+
+        monkeypatch.setattr(document, "_verify_output", remove_break_then_verify)
+        with pytest.raises(ValidationError, match="break-only paragraph"):
+            document.apply(path)
+    else:
+        assert document.apply(path)["text_integrity"] == "passed"
 
 
 @pytest.mark.parametrize(

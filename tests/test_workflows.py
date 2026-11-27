@@ -366,10 +366,6 @@ def test_release_build_has_only_packaging_steps(release_workflow):
     steps = release_workflow["jobs"]["build"]["steps"]
 
     assert tuple(step.get("id") for step in steps) == BUILD_STEP_IDS
-    assert (
-        "artifacts/evidence/artifacts/dist/*"
-        in step_by_id(release_workflow["jobs"]["build"], "copy-distribution")["run"]
-    )
 
 
 def test_release_build_verifies_wheel_and_sdist(release_workflow):
@@ -390,10 +386,11 @@ def test_release_build_reuses_linux_evidence_without_rebuilding(release_workflow
     assert download["uses"].startswith("actions/download-artifact@")
     assert download["with"]["name"] == "evidence-Linux"
     assert download["with"]["path"] == "artifacts/evidence"
-    assert (
-        "cp artifacts/evidence/artifacts/dist/* dist/"
-        in step_by_id(build, "copy-distribution")["run"]
-    )
+    copy = step_by_id(build, "copy-distribution")["run"]
+    assert "mkdir dist" in copy
+    assert "wheels=(artifacts/evidence/artifacts/dist/*.whl)" in copy
+    assert "sdists=(artifacts/evidence/artifacts/dist/*.tar.gz)" in copy
+    assert 'cp -- "${wheels[0]}" "${sdists[0]}" dist/' in copy
     assert "--validate-only" in verify["run"]
     build_commands = "\n".join(step.get("run", "") for step in build["steps"])
     assert "uv build" not in build_commands
@@ -417,7 +414,13 @@ def test_release_build_and_reusable_jobs_check_out_github_sha(
 
     for job in checkout_jobs:
         checkout = step_by_id(job, "checkout")
-        ref = checkout.get("with", {}).get("ref", "${{ github.sha }}")
+        assert checkout["uses"].startswith("actions/checkout@")
+        options = checkout.get("with", {})
+        assert (
+            options.get("repository", "${{ github.repository }}")
+            == "${{ github.repository }}"
+        )
+        ref = options.get("ref", "${{ github.sha }}")
         assert ref == "${{ github.sha }}"
 
 

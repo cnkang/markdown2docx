@@ -323,10 +323,10 @@ def handle_conversion(
             validate_output=validate,
             lang=lang,
             direction=direction,
-            offline=True if untrusted else offline,
+            offline=offline,
             allow_unverified_fonts=allow_unverified_fonts,
-            resources_offline=True if untrusted else resources_offline,
-            restricted=True if untrusted else restricted,
+            resources_offline=resources_offline,
+            restricted=restricted,
             render=render,
             preview_dir=preview_dir,
         )

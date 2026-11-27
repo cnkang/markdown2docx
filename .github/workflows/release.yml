@@ -61,8 +61,15 @@ jobs:
       - id: copy-distribution
         name: Reuse the validated distribution artifacts
         run: |
-          mkdir -p dist
-          cp artifacts/evidence/artifacts/dist/* dist/
+          shopt -s nullglob
+          wheels=(artifacts/evidence/artifacts/dist/*.whl)
+          sdists=(artifacts/evidence/artifacts/dist/*.tar.gz)
+          if (( ${#wheels[@]} != 1 || ${#sdists[@]} != 1 )); then
+            echo "Expected exactly one wheel and one sdist in the Linux evidence" >&2
+            exit 1
+          fi
+          mkdir dist
+          cp -- "${wheels[0]}" "${sdists[0]}" dist/
       - id: verify-distributions
         name: Verify tag version and distributions
         env:

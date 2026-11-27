@@ -194,18 +194,45 @@ def test_preview_refuses_reparse_error_while_pinning_output(
 ):
     output = tmp_path / "preview"
     original_open = os.open
+    rejected = []
 
     def reject_output(path, flags, *args, **kwargs):
         if os.fspath(path) == output.name and kwargs.get("dir_fd") is not None:
+            rejected.append(path)
             raise OSError(errno.ELOOP, "Refusing resource reparse point", path)
         return original_open(path, flags, *args, **kwargs)
 
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {reject_output})
     monkeypatch.setattr("markdown2docx.report.os.open", reject_output)
 
     report = render_preview(tmp_path / "input.docx", output, resolver())
 
     assert report["status"] == "failed"
+    assert rejected == [output.name]
     assert not list(output.glob("generation-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="posix_only: pinned path recovery")
+def test_preview_rolls_back_generation_if_published_path_recovery_fails(
+    tmp_path, renderer, monkeypatch
+):
+    output = tmp_path / "preview"
+    previous = output / "generation-old"
+    previous.mkdir(parents=True)
+    original_current_path = PinnedDirectory.current_path
+
+    def fail_after_rename(self):
+        if self.path == output and any(
+            path != previous for path in output.glob("generation-*")
+        ):
+            raise OSError("Cannot recover published path")
+        return original_current_path(self)
+
+    monkeypatch.setattr(PinnedDirectory, "current_path", fail_after_rename)
+    report = render_preview(tmp_path / "input.docx", output, resolver())
+
+    assert report["status"] == "failed"
+    assert list(output.iterdir()) == [previous]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")

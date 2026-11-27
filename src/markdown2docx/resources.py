@@ -4,11 +4,12 @@ import errno
 import os
 import stat
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, BinaryIO, Sequence
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 from .exceptions import ConversionError
+from .output import _fdopen_owned
 
 if TYPE_CHECKING:
     from .output import PinnedDirectory
@@ -207,14 +208,16 @@ def stage_local_resources(
                     raise ConversionError(
                         "", "Unable to stage image resource safely"
                     ) from exc
-                original = os.fdopen(descriptor, "rb")
+                original = _fdopen_owned(descriptor, "rb")
             else:
                 posix_descriptor: int | None = None
                 parent: int | None = None
                 try:
                     parent = _open_parent(source.parent)
                     posix_descriptor = os.open(
-                        source.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent
+                        source.name,
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        dir_fd=parent,
                     )
                     original = os.fdopen(posix_descriptor, "rb")
                     posix_descriptor = None
@@ -233,6 +236,7 @@ def stage_local_resources(
                         os.close(posix_descriptor)
                     if parent is not None:
                         os.close(parent)
+            target_context: BinaryIO
             try:
                 if workspace is None:
                     target_context = path.open("xb")
@@ -240,7 +244,7 @@ def stage_local_resources(
                     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
                     if os.name != "nt":
                         flags |= os.O_NOFOLLOW
-                    target_context = os.fdopen(
+                    target_context = _fdopen_owned(
                         workspace.open_file(path.name, flags), "wb"
                     )
             except BaseException:

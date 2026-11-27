@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import itertools
 import os
 import shutil
 import tempfile
 import unicodedata
 import uuid
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -429,26 +431,33 @@ def _match_code_structures(
     offsets: dict[str, int] = {}
     matches: list[tuple[TextStructure, Any | None, str | None]] = []
     for structure in expected:
-        choices = by_anchor.get(structure.anchor or "", [])
+        anchor = structure.anchor or ""
+        choices = by_anchor.get(anchor, [])
+        offset = offsets.get(anchor, 0)
+        eligible: Iterator[int]
         if structure.bookmark_id is not None:
-            choices = [
-                choice for choice in choices if choice[1] == structure.bookmark_id
-            ]
-        offset = offsets.get(structure.anchor or "", 0)
+            eligible = (
+                index
+                for index in range(offset, len(choices))
+                if choices[index][1] == structure.bookmark_id
+            )
+        else:
+            eligible = iter(range(offset, len(choices)))
+        first = next(eligible, None)
+        if first is None:
+            matches.append((structure, None, None))
+            continue
         selected = next(
             (
                 index
-                for index in range(offset, len(choices))
+                for index in itertools.chain((first,), eligible)
                 if _paragraph_events(choices[index][2]) == structure.events
             ),
-            offset,
+            first,
         )
-        if selected < len(choices):
-            _, bookmark_id, paragraph = choices[selected]
-            offsets[structure.anchor or ""] = selected + 1
-            matches.append((structure, paragraph, bookmark_id))
-        else:
-            matches.append((structure, None, None))
+        _, bookmark_id, paragraph = choices[selected]
+        offsets[anchor] = selected + 1
+        matches.append((structure, paragraph, bookmark_id))
     return matches
 
 
@@ -463,6 +472,7 @@ class RunContext:
     code: bool = False
     character_style: str | None = None
     role: str = "body"
+    split_fragment: bool = False
     cjk: str = "cjk-sc"
     structure: TextStructure | None = None
 
@@ -519,6 +529,7 @@ class MultilingualDocument:
             ).hexdigest()[1:]
             bookmarks[identifier] = identifier
             bookmarks[hashed] = identifier
+            bookmarks["X" + hashed] = identifier
         return bookmarks
 
     def _apply_table_caption_order(self, expected_order: dict[str, list[str]]) -> None:
@@ -1574,6 +1585,28 @@ class MultilingualDocument:
                     f"expected {_events_repr(expected.events)}, actual {_events_repr(actual_events)}"
                 )
         expected_code = [item for item in expected_structures if item.code]
+        break_only = [
+            item.events
+            for item in expected_structures
+            if not item.code
+            and item.events
+            and all(event is None for event in item.events)
+        ]
+        if break_only:
+            marked_paragraphs = {_nearest_paragraph(run) for run in actual_runs}
+            break_paragraph_events = (
+                _paragraph_events(paragraph)
+                for paragraph in paragraphs
+                if paragraph not in marked_paragraphs
+            )
+            for expected_events in break_only:
+                if not any(
+                    events == expected_events for events in break_paragraph_events
+                ):
+                    failures.append(
+                        f"{name}: break-only paragraph text structure mismatch"
+                    )
+                    break
         code_matches = _match_code_structures(
             expected_code, _code_candidates(root, self._code_bookmarks())
         )
@@ -1644,6 +1677,9 @@ class MultilingualDocument:
         return None
 
     def _font_key_for_text(self, text: str, spec: RunContext) -> str | None:
+        if text == spec.text and spec.split_fragment:
+            # The full fragment was classified and coverage-checked before splitting.
+            return spec.font
         parts = fragments(text, spec.lang, "", code=spec.code, cjk=spec.cjk)
         if len(parts) != 1:
             return None
@@ -1740,6 +1776,7 @@ class MultilingualDocument:
                         name,
                         code,
                         role=self._role,
+                        split_fragment=piece != part,
                         cjk=cjk,
                         structure=structure,
                     ),

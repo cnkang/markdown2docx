@@ -13,7 +13,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, Literal, cast
 
 FILE_READ_ATTRIBUTES = 0x80
 FILE_TRAVERSE = 0x20
@@ -202,10 +202,12 @@ class PinnedDirectory:
                 self.descriptor, cast(Any, fcntl).F_GETPATH, bytearray(1024)
             )
             return Path(os.fsdecode(mac_value).rstrip("\0"))
-        proc_value = os.readlink(f"/proc/self/fd/{self.descriptor}")
-        if proc_value.endswith(" (deleted)"):
-            proc_value = proc_value[: -len(" (deleted)")]
-        return Path(proc_value)
+        recovered = Path(os.readlink(f"/proc/self/fd/{self.descriptor}"))
+        if _identity(recovered.lstat()) != _identity(expected):
+            raise OSError(
+                f"Directory path no longer identifies the pinned directory: {recovered}"
+            )
+        return recovered
 
     def cleanup(self) -> None:
         if os.name == "nt":
@@ -530,6 +532,16 @@ def _check_destination(name: str, descriptor: int, overwrite: bool) -> None:
         raise OSError(f"Output destination must be a regular file: {name}")
 
 
+def _fdopen_owned(descriptor: int, mode: Literal["rb", "wb"]) -> BinaryIO:
+    """Transfer descriptor ownership, closing it if stream setup fails."""
+    try:
+        return os.fdopen(descriptor, mode)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        raise
+
+
 def _publish(
     source: PinnedDirectory, destination: Path, parent: int, overwrite: bool
 ) -> None:
@@ -545,20 +557,17 @@ def _publish(
         info = os.fstat(staging)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise OSError("Output staging directory is not private")
-        original_descriptor = source.open_regular("document.docx")
-        try:
-            file_descriptor = os.open(
-                "document.docx",
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=staging,
-            )
-        except BaseException:
-            os.close(original_descriptor)
-            raise
         with (
-            os.fdopen(file_descriptor, "wb") as target,
-            os.fdopen(original_descriptor, "rb") as original,
+            _fdopen_owned(source.open_regular("document.docx"), "rb") as original,
+            _fdopen_owned(
+                os.open(
+                    "document.docx",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=staging,
+                ),
+                "wb",
+            ) as target,
         ):
             shutil.copyfileobj(original, target)
         _check_destination(destination.name, parent, overwrite)

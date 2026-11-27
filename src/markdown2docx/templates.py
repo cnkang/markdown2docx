@@ -375,6 +375,9 @@ class DocxTemplateManager:
         workspace: PinnedDirectory | None = None,
     ) -> Path:
         """Derive a content-free reference from the installed Pandoc defaults."""
+        if workspace is not None and output_path.absolute().parent != workspace.path:
+            raise ValueError("Reference output must be inside the supplied workspace")
+
         from docx.oxml.ns import qn
 
         from .runner import run_pandoc

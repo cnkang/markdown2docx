@@ -163,19 +163,21 @@ PIXEL_PNG = base64.b64decode(
 
 @pytest.mark.skipif(os.name == "nt", reason="posix_only: macOS system temporary alias")
 def test_restricted_conversion_under_macos_tmp_alias(monkeypatch):
-    document = Path(tempfile.mkdtemp(prefix="resource-root-", dir="/tmp"))
-    source = document / "input.md"
-    source.write_text("![pixel](image.png)\n", encoding="utf-8")
-    (document / "image.png").write_bytes(PIXEL_PNG)
-    output = document / "output.docx"
-    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
     from zipfile import ZipFile
 
-    path = MarkdownToDocxConverter().convert_untrusted(source, output)
+    monkeypatch.setattr(MarkdownToDocxConverter, "_validate_pandoc", lambda _: None)
+    with tempfile.TemporaryDirectory(prefix="resource-root-", dir="/tmp") as name:
+        document = Path(name)
+        source = document / "input.md"
+        source.write_text("![pixel](image.png)\n", encoding="utf-8")
+        (document / "image.png").write_bytes(PIXEL_PNG)
+        output = document / "output.docx"
 
-    assert path == output
-    with ZipFile(path) as archive:
-        assert any(name.startswith("word/media/") for name in archive.namelist())
+        path = MarkdownToDocxConverter().convert_untrusted(source, output)
+
+        assert path == output
+        with ZipFile(path) as archive:
+            assert any(name.startswith("word/media/") for name in archive.namelist())
 
 
 @pytest.mark.parametrize(
@@ -821,16 +823,9 @@ def test_converters_forward_fixed_untrusted_policy(tmp_path, entry):
         assert "offline" not in kwargs
 
 
-def test_cli_untrusted_forwards_fixed_safe_policy(capsys):
-    report = Mock()
-    report.to_dict.return_value = {
-        "status": "success",
-        "output_path": "output.docx",
-    }
-    with patch("markdown2docx.cli.MarkdownToDocxConverter") as converter_class:
-        converter = converter_class.return_value
-        converter.convert_untrusted_with_report.return_value = report
-
+@pytest.mark.parametrize("option", ["offline", "resources_offline", "restricted"])
+def test_cli_untrusted_rejects_explicit_policy_disable(capsys, option):
+    with patch.object(MarkdownToDocxConverter, "_validate_pandoc", return_value=None):
         result = handle_conversion(
             "input.md",
             "output.docx",
@@ -841,19 +836,11 @@ def test_cli_untrusted_forwards_fixed_safe_policy(capsys):
             MarkdownToDocxConfig(),
             json_output=True,
             untrusted=True,
-            offline=False,
-            resources_offline=False,
-            restricted=False,
+            **{option: False},
         )
 
-    assert result == 0
-    converter.convert_untrusted_with_report.assert_called_once()
-    kwargs = converter.convert_untrusted_with_report.call_args.kwargs
-    assert kwargs["offline"] is True
-    assert kwargs["resources_offline"] is True
-    assert kwargs["restricted"] is True
-    converter.convert_with_report.assert_not_called()
-    assert json.loads(capsys.readouterr().out)["status"] == "success"
+    assert result == 1
+    assert f"{option}=False" in capsys.readouterr().out
 
 
 def test_cli_parser_accepts_untrusted_alongside_negative_policy_flags():
@@ -895,9 +882,6 @@ def test_cli_untrusted_returns_stable_json_error_without_docx(tmp_path, markdown
                 "--output",
                 str(output),
                 "--untrusted",
-                "--no-restricted",
-                "--no-resources-offline",
-                "--no-offline",
                 "--json",
             ],
             capture_output=True,

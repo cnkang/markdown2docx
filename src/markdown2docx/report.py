@@ -143,6 +143,7 @@ def _publish_generation(generation: PinnedDirectory, target: PinnedDirectory) ->
         raise
     staging = PinnedDirectory(staging_path, staging_descriptor)
     published = False
+    entry_name = staging_name
     staging_closed = False
     try:
         _copy_generation(generation, staging)
@@ -150,6 +151,7 @@ def _publish_generation(generation: PinnedDirectory, target: PinnedDirectory) ->
             os.close(staging_descriptor)
             staging_closed = True
             os.replace(staging.path, target.path / published_name)
+            published_path = target.path / published_name
         else:
             staging.assert_pinned()
             os.rename(
@@ -158,6 +160,8 @@ def _publish_generation(generation: PinnedDirectory, target: PinnedDirectory) ->
                 src_dir_fd=target.descriptor,
                 dst_dir_fd=target.descriptor,
             )
+            entry_name = published_name
+            published_path = target.current_path() / published_name
         published = True
     finally:
         try:
@@ -175,8 +179,8 @@ def _publish_generation(generation: PinnedDirectory, target: PinnedDirectory) ->
                 os.close(staging_descriptor)
             if not published:
                 with contextlib.suppress(OSError):
-                    target.remove_entry(staging_name)
-    return target.current_path() / published_name
+                    target.remove_entry(entry_name)
+    return published_path
 
 
 def render_preview(

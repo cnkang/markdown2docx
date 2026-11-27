@@ -122,7 +122,9 @@ def write_wheel(
         contents[f"{DIST_INFO}/RECORD"] = record_contents(contents)
     with zipfile.ZipFile(path, "w") as archive:
         for name, data in contents.items():
-            archive.writestr(name, data)
+            member = zipfile.ZipInfo(name)
+            member.filename = name
+            archive.writestr(member, data)
     return path
 
 
@@ -384,7 +386,7 @@ def test_record_reader_stops_when_line_count_exceeds_member_count(
 
     monkeypatch.setattr(validator.csv, "reader", guarded_reader)
 
-    with pytest.raises(validator.DistributionError, match="RECORD"):
+    with pytest.raises(validator.DistributionError, match="RECORD row count"):
         validator.validate_wheel(wheel, VERSION)
 
 
@@ -420,7 +422,7 @@ def test_wheel_rejects_unsafe_member_names(validator, tmp_path, relative_path):
         files=wheel_files(**{relative_path: b"escape\n"}),
     )
 
-    with pytest.raises(ValueError, match="unsafe|member|path"):
+    with pytest.raises(ValueError, match="Unsafe archive member path"):
         validator.validate_wheel(wheel, VERSION)
 
 
@@ -438,11 +440,13 @@ def test_wheel_enforces_archive_resource_limits(
 ):
     files = wheel_files()
     wheel = write_wheel(tmp_path, files=files)
+    with zipfile.ZipFile(wheel) as archive:
+        member_sizes = [member.file_size for member in archive.infolist()]
     sizes = {
         "MAX_WHEEL_BYTES": wheel.stat().st_size,
-        "MAX_WHEEL_MEMBERS": len(files) + 1,
-        "MAX_WHEEL_MEMBER_BYTES": max(len(data) for data in files.values()),
-        "MAX_WHEEL_UNCOMPRESSED_BYTES": sum(len(data) for data in files.values()),
+        "MAX_WHEEL_MEMBERS": len(member_sizes),
+        "MAX_WHEEL_MEMBER_BYTES": max(member_sizes),
+        "MAX_WHEEL_UNCOMPRESSED_BYTES": sum(member_sizes),
     }
     monkeypatch.setattr(validator, constant, sizes[constant] + size_delta)
 
@@ -525,6 +529,32 @@ def test_wheel_preflight_runs_before_zipfile(validator, tmp_path, monkeypatch):
 
     with pytest.raises(validator.DistributionError, match="entry count|members|limit"):
         validator.validate_wheel(wheel, VERSION)
+
+
+def test_zip_preflight_rejects_understated_central_directory_count(
+    validator, tmp_path, monkeypatch
+):
+    wheel = write_wheel(tmp_path)
+    data = bytearray(wheel.read_bytes())
+    struct.pack_into("<HH", data, len(data) - 14, 1, 1)
+    wheel.write_bytes(data)
+    monkeypatch.setattr(validator, "MAX_WHEEL_MEMBERS", 1)
+    with pytest.raises(
+        validator.DistributionError, match="central-directory entry count limit"
+    ):
+        validator._preflight_zip(wheel)
+
+
+def test_extract_sdist_rejects_bytes_changed_after_validation(validator, tmp_path):
+    path = write_sdist(tmp_path)
+    validated = validator.validate_sdist(path, VERSION)
+    write_sdist(tmp_path, files=sdist_files(**{f"{SDIST_ROOT}/README.md": b"Changed"}))
+    destination = tmp_path / "source"
+    with pytest.raises(
+        validator.DistributionError, match="changed after distribution validation"
+    ):
+        validator.extract_sdist(path, destination, expected_hash=validated.sha256)
+    assert not destination.exists()
 
 
 def test_wheel_reads_members_without_unbounded_archive_read(
@@ -1499,7 +1529,7 @@ def orchestration_dependencies(validator, tmp_path, events, fail_event=None):
         wheel=validator.WheelInfo(
             wheel, VERSION, {PROJECT_NAME: validator.CONSOLE_TARGET}
         ),
-        sdist=validator.SdistInfo(sdist, VERSION),
+        sdist=validator.SdistInfo(sdist, VERSION, "validated-sdist-hash"),
     )
     temporary_directories = []
 
@@ -1520,7 +1550,8 @@ def orchestration_dependencies(validator, tmp_path, events, fail_event=None):
     def install_and_smoke(*args, **kwargs):
         record(f"install-smoke:{kwargs['conversion']}")
 
-    def extract_sdist(path, destination):
+    def extract_sdist(path, destination, *, expected_hash):
+        assert expected_hash == artifacts.sdist.sha256
         record("extract-sdist")
         return tmp_path / "source"
 
