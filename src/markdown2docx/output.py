@@ -664,6 +664,7 @@ def secure_temporary_directory(
     if os.name == "nt":
         if directory is None:
             raise OSError("A pinned Windows temporary directory is required")
+        directory = directory.absolute()
         with _windows_directory_pin(directory):
             parent_descriptor = open_windows_resource(directory, directory=True)
             temporary: Path | None = None

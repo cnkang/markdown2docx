@@ -497,9 +497,10 @@ def test_windows_workspace_creation_is_atomic_and_pinned(monkeypatch, tmp_path):
     cleaned = []
 
     def create_directory(_parent_descriptor, directory, prefix):
-        temporary.mkdir()
+        workspace_path = directory / temporary.name
+        workspace_path.mkdir()
         created.append((directory, prefix))
-        return temporary, os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+        return workspace_path, os.open(workspace_path, os.O_RDONLY | os.O_DIRECTORY)
 
     def open_resource(path, *, directory=True, **_kwargs):
         flags = os.O_RDONLY | os.O_NOFOLLOW
@@ -518,6 +519,7 @@ def test_windows_workspace_creation_is_atomic_and_pinned(monkeypatch, tmp_path):
         original_remove_contents(path)
 
     kernel = SimpleNamespace(CloseHandle=os.close)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(output_module, "os", WindowsOSProxy())
     monkeypatch.setattr(output_module, "_windows_api", lambda: (None, kernel, None))
     monkeypatch.setattr(output_module, "_windows_directory_pin", windows_pin)
@@ -528,7 +530,7 @@ def test_windows_workspace_creation_is_atomic_and_pinned(monkeypatch, tmp_path):
     )
 
     with secure_temporary_directory(
-        prefix="md2docx-convert-", directory=parent
+        prefix="md2docx-convert-", directory=Path("parent")
     ) as workspace:
         assert workspace.path == temporary
         assert workspace.path.is_dir()
